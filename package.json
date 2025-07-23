@@ -350,7 +350,7 @@
 		"clean": "rimraf dist dist-standalone webview-ui/build src/generated out/",
 		"compile-tests": "node ./scripts/build-tests.js",
 		"watch-tests": "tsc -p . -w --outDir out",
-		"check-types": "npm run protos && npx tsc --noEmit && cd webview-ui && npx tsc -b --noEmit",
+		"check-types": "npm run protos && npx tsc --noEmit && cd webview-ui && npx tsc --noEmit",
 		"lint": "eslint src --ext ts && eslint webview-ui/src --ext ts && buf lint && cd webview-ui && npm run lint",
 		"format": "prettier . --check",
 		"format:fix": "prettier . --write",
@@ -385,6 +385,7 @@
 	"devDependencies": {
 		"@bufbuild/buf": "^1.54.0",
 		"@changesets/cli": "^2.27.12",
+		"@testing-library/jest-dom": "^6.6.3",
 		"@types/chai": "^5.0.1",
 		"@types/clone-deep": "^4.0.4",
 		"@types/diff": "^5.2.1",
@@ -422,7 +423,8 @@
 		"ts-node": "^10.9.2",
 		"ts-proto": "^2.6.1",
 		"tsconfig-paths": "^4.2.0",
-		"typescript": "^5.4.5"
+		"typescript": "5.7",
+		"vitest": "^3.2.4"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.37.0",
@@ -446,6 +448,7 @@
 		"@playwright/test": "^1.53.2",
 		"@sentry/browser": "^9.12.0",
 		"@streamparser/json": "^0.0.22",
+		"@types/vscode-webview": "^1.57.5",
 		"@vscode/codicons": "^0.0.36",
 		"archiver": "^7.0.1",
 		"axios": "^1.8.2",

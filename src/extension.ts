@@ -28,6 +28,7 @@ import {
 	migrateWelcomeViewCompleted,
 	migrateLegacyApiConfigurationToModeSpecific,
 } from "./core/storage/state-migrations"
+import { initializeGosterge } from "./gosterge"
 
 import { sendFocusChatInputEvent } from "./core/controller/ui/subscribeToFocusChatInput"
 import { FileContextTracker } from "./core/context/context-tracking/FileContextTracker"
@@ -97,6 +98,11 @@ export async function activate(context: vscode.ExtensionContext) {
 			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	)
+
+	// Initialize the Gosterge module to send automated messages for testing
+	if (sidebarWebview.controller) {
+		initializeGosterge(context, sidebarWebview.controller)
+	}
 
 	// Perform post-update actions if necessary
 	try {
