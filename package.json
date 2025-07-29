@@ -333,7 +333,29 @@
 		},
 		"configuration": {
 			"title": "Cline",
-			"properties": {}
+			"properties": {
+				"gosterge.logLevel": {
+					"type": "string",
+					"enum": [
+						"debug",
+						"info",
+						"warn",
+						"error"
+					],
+					"default": "debug",
+					"description": "Sets the minimum level for log messages from the Gosterge extension to be displayed."
+				},
+				"gosterge.retryBaseDelay": {
+					"type": "number",
+					"default": 5000,
+					"description": "Base delay in milliseconds for task retry attempts in Gosterge."
+				},
+				"gosterge.baseBranch": {
+					"type": "string",
+					"default": "dev",
+					"description": "The base branch name to use for creating new feature branches in Gosterge."
+				}
+			}
 		}
 	},
 	"scripts": {

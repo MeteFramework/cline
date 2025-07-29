@@ -40,6 +40,7 @@ import { VscodeWebviewProvider } from "./hosts/vscode/VscodeWebviewProvider"
 import { GitCommitGenerator } from "./integrations/git/commit-message-generator"
 import { AuthService } from "./services/auth/AuthService"
 import { ShowMessageType } from "./shared/proto/host/window"
+import { initializeGosterge } from "./gosterge"
 /*
 Built using https://github.com/microsoft/vscode-webview-ui-toolkit
 
@@ -91,6 +92,10 @@ export async function activate(context: vscode.ExtensionContext) {
 			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	)
+
+	if (sidebarWebview.controller) {
+		initializeGosterge(context, sidebarWebview.controller)
+	}
 
 	// Perform post-update actions if necessary
 	try {
