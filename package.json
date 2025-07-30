@@ -350,11 +350,6 @@
 					"default": 5000,
 					"description": "Base delay in milliseconds for task retry attempts in Gosterge."
 				},
-				"gosterge.baseBranch": {
-					"type": "string",
-					"default": "dev",
-					"description": "The base branch name to use for creating new feature branches in Gosterge."
-				},
 				"gosterge.stallTimeout": {
 					"type": "number",
 					"default": 120000,

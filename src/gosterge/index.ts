@@ -91,6 +91,7 @@ export interface GostergeTask {
 	description: string
 	repoUrl: string
 	branch: string
+	baseBranch?: string // NEW: base branch for the task
 	priority?: "low" | "medium" | "high" | "urgent"
 	estimatedTime?: number // dakika
 	tags?: string[]
@@ -153,10 +154,9 @@ interface GostergeConfig {
 	retryBaseDelay: number // Added
 	/** Cline’dan mesaj gelmezse iptal süresi (ms) */
 	stallTimeout: number
-	baseBranch: string // Added
 }
 
-function loadConfig(): GostergeConfig {
+function loadConfig(context: vscode.ExtensionContext): GostergeConfig {
 	const cfg = vscode.workspace.getConfiguration("gosterge")
 
 	// Mock API kullanıldığı için endpoint ve token'a gerek yok
@@ -178,7 +178,6 @@ function loadConfig(): GostergeConfig {
 		logLevel: cfg.get<"debug" | "info" | "warn" | "error">("logLevel"), // Added
 		retryBaseDelay: cfg.get<number>("retryBaseDelay") ?? 5000, // Added
 		stallTimeout: cfg.get<number>("stallTimeout") ?? 120_000,
-		baseBranch: cfg.get<string>("baseBranch") ?? "main", // Added
 	}
 }
 
@@ -360,10 +359,8 @@ class GitService {
 		return remoteName
 	}
 
-	async switchToBranch(branch: string): Promise<void> {
-		const baseBranch = this.config.baseBranch // Use configured base branch
+	async switchToBranch(branch: string, baseBranch: string): Promise<void> {
 		const fullBranchName = `${this.config.branchPrefix}${branch}`
-
 		this.logger.debug(`🌿 git checkout ${baseBranch} → create ${fullBranchName}`)
 
 		// Önce base branch'e geç
@@ -641,7 +638,7 @@ class TaskManager {
 		})
 
 		// Branch'e geç
-		await this.gitService.switchToBranch(task.branch)
+		await this.gitService.switchToBranch(task.branch, task.baseBranch!) // baseBranch is now guaranteed by the API contract
 		this.logger.info(`${this.getTaskLogPrefix()}🌿 Branch oluşturuldu: ${this.config.branchPrefix}${task.branch}`)
 	}
 
@@ -911,7 +908,7 @@ export function initializeGosterge(
 	try {
 		checkGitBinary() // Check for Git binary at startup
 		// Konfigürasyonu yükle
-		const config = loadConfig()
+		const config = loadConfig(context)
 		logger.info(`⚙️ Endpoint: ${config.endpoint}`)
 		logger.info(`⏱️ Poll Interval: ${config.pollInterval / 1000}s`)
 		logger.info(`⏱️ Task Timeout: ${config.taskTimeout / 60000}m`)

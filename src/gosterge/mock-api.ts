@@ -31,19 +31,20 @@ function initializeMockTasks() {
 			tags: ["frontend", "authentication", "ui"],
 			jiraTicket: "AUTH-123",
 			assignee: "developer@company.com",
+			baseBranch: "dev",
 		},
 		{
 			id: "task-002",
-			title: "API rate limiting middleware ekle",
-			description:
-				"Express.js backend'ine rate limiting middleware ekleyerek API abuse'ü önle. Her IP için dakikada maksimum 100 request limiti koy.",
+			title: "Chat ekranı arayüz iyileştirmesi",
+			description: "Chat componentinin tasarımı çok yetersiz. ideal bir chat ekranı tasarla profesyonel olsun",
 			repoUrl: "https://bitbucket.bulut.ai/scm/gos/gosterge.git",
-			branch: "feature/rate-limiting",
+			branch: "feature/chat-ekrani-iyilestiröe",
 			priority: "high",
 			estimatedTime: 60,
-			tags: ["backend", "security", "middleware"],
+			tags: ["frontend"],
 			jiraTicket: "SEC-456",
 			assignee: "backend-dev@company1.com",
+			baseBranch: "dev",
 		},
 		{
 			id: "task-003",
@@ -57,6 +58,7 @@ function initializeMockTasks() {
 			tags: ["frontend", "dashboard", "charts"],
 			jiraTicket: "DASH-789",
 			assignee: "frontend-dev@company.com",
+			baseBranch: "dev",
 		},
 	]
 
@@ -247,6 +249,7 @@ export function addTestTask(title: string, description: string) {
 		tags: ["test"],
 		jiraTicket: `TEST-${Math.floor(Math.random() * 1000)}`,
 		assignee: "test@example.com",
+		baseBranch: "main",
 	}
 
 	mockAPI.addMockTask(task)
