@@ -15,21 +15,13 @@ import * as vscode from "vscode"
 import fetch, { Headers, Response } from "node-fetch"
 import { Controller } from "../core/controller"
 import { GostergeError } from "./errors" // Import GostergeError
+import { Watchdog } from "./watchdog" // Import Watchdog
+import { ClineMessage, ClineIntegration } from "./cline" // Import ClineMessage and ClineIntegration from new file
+import { Buffer } from "buffer" // Import Buffer for dynamic remote name
 
 /* ------------------------------------------------------------------ */
 /* 1. Tip Tanımlamaları                                                */
 /* ------------------------------------------------------------------ */
-
-// Cline mesaj tipi
-interface ClineMessage {
-	say?: string
-	ask?: string
-	type?: string
-	text?: string
-	filesChanged?: number
-	testsRun?: number
-	testsPassed?: number
-}
 
 // Git extension tipleri
 type GitExtension = {
@@ -91,7 +83,7 @@ type Change = {
 /* 2. Gösterge Veri Modelleri                                          */
 /* ------------------------------------------------------------------ */
 
-type UUID = string
+export type UUID = string
 
 export interface GostergeTask {
 	id: UUID
@@ -159,6 +151,8 @@ interface GostergeConfig {
 	healthCheckInterval: number
 	logLevel?: "debug" | "info" | "warn" | "error" // Added
 	retryBaseDelay: number // Added
+	/** Cline’dan mesaj gelmezse iptal süresi (ms) */
+	stallTimeout: number
 	baseBranch: string // Added
 }
 
@@ -183,6 +177,7 @@ function loadConfig(): GostergeConfig {
 		healthCheckInterval: cfg.get<number>("healthCheckInterval") ?? 60_000,
 		logLevel: cfg.get<"debug" | "info" | "warn" | "error">("logLevel"), // Added
 		retryBaseDelay: cfg.get<number>("retryBaseDelay") ?? 5000, // Added
+		stallTimeout: cfg.get<number>("stallTimeout") ?? 120_000,
 		baseBranch: cfg.get<string>("baseBranch") ?? "main", // Added
 	}
 }
@@ -353,7 +348,11 @@ class GitService {
 		}
 
 		// Remote ismi oluştur
-		const remoteName = `gosterge-remote` // Use a fixed name
+		// Use a dynamic name based on the URL to avoid conflicts with multiple repos
+		const remoteName = `gosterge-${Buffer.from(url)
+			.toString("base64")
+			.replace(/[^a-zA-Z0-9]/g, "")
+			.slice(0, 8)}`
 
 		await this.runGit(() => this.repo.addRemote(remoteName, url), `addRemote:${remoteName}`)
 		await this.runGit(() => this.repo.fetch(remoteName), `fetchRemote:${remoteName}`)
@@ -498,152 +497,6 @@ class GitService {
 /* ------------------------------------------------------------------ */
 /* 6. Cline Controller Entegrasyonu                                    */
 /* ------------------------------------------------------------------ */
-export class ClineIntegration implements vscode.Disposable {
-	private controller: Controller
-	private logger: Logger
-
-	/** Poller interval ID ‑ null => çalışmıyor */
-	private poller: NodeJS.Timeout | null = null
-
-	/** Son okunan mesaj sayısı (yinelemeyi azaltmak için) */
-	private lastMsgCount = 0
-
-	/** Şu anda izlenen görevin kimliği (null => aktif görev yok) */
-	private activeTaskId: UUID | null = null
-
-	/** Aktif görev için “tamamlandı” bayrağı */
-	private completed = false
-
-	constructor(controller: Controller, logger: Logger) {
-		this.controller = controller
-		this.logger = logger
-	}
-
-	/* ------------------------------------------------------------------ */
-	/* Görev Yaşam Döngüsü                                                */
-	/* ------------------------------------------------------------------ */
-
-	/**
-	 * Yeni bir görev başlatır ve Cline’a prompt gönderir.
-	 *  - activeTaskId / completed bayraklarını sıfırlar
-	 *  - abort flag’ini temizler
-	 */
-	async startTask(task: GostergeTask): Promise<void> {
-		this.activeTaskId = task.id
-		this.completed = false
-
-		const prompt = this.buildTaskPrompt(task)
-
-		await this.controller.initTask(prompt)
-
-		// Eski bir abort bayrağı kalmış olabilir; temizleyelim
-		if (this.controller.task?.taskState) {
-			this.controller.task.taskState.abort = false
-		}
-
-		this.lastMsgCount = 0
-	}
-
-	/**
-	 * Cline mesajlarını periyodik olarak poll’lar ve handler’a iletir.
-	 * Çağıran dispose ettiğinde poller durur.
-	 */
-	onMessage(handler: (msg: ClineMessage) => void): vscode.Disposable {
-		// Eski poller varsa durdur
-		if (this.poller) clearInterval(this.poller)
-
-		this.poller = setInterval(() => {
-			for (const msg of this.pollMessages()) {
-				/* Aktif göreve ait completion_result geldiyse kaydet */
-				if (this.activeTaskId && (msg.say === "completion_result" || msg.ask === "completion_result")) {
-					this.completed = true
-				}
-
-				handler(msg)
-			}
-		}, 500)
-
-		// VS Code‑uyumlu disposable döndür
-		return {
-			dispose: () => {
-				if (this.poller) clearInterval(this.poller)
-				this.poller = null
-			},
-		}
-	}
-
-	/**
-	 *  Aktif görevin “tamamlandı” durumunu döndürür.
-	 *  Kalıcı completed bayrağını kullanır.
-	 */
-	isTaskComplete(): boolean {
-		return this.completed
-	}
-
-	/**
-	 * Aktif görevin “abort” olup olmadığına bakar.
-	 * (Başka görevlerin eski abort bayrağını dikkate almaz.)
-	 */
-	isTaskAborted(): boolean {
-		return (
-			this.activeTaskId !== null &&
-			this.controller.task?.taskId === this.activeTaskId &&
-			!!this.controller.task?.taskState.abort
-		)
-	}
-
-	/** Aktif görevi iptal eder */
-	async abortTask(): Promise<void> {
-		await this.controller.cancelTask()
-	}
-
-	/* ------------------------------------------------------------------ */
-	/* Yardımcılar                                                        */
-	/* ------------------------------------------------------------------ */
-
-	/**
-	 * Cline mesajlarını (webview state’inden) getirir.
-	 * Yalnızca yeni gelen(ler)i döndürür.
-	 */
-	private pollMessages(): ClineMessage[] {
-		const msgs = this.controller?.task?.messageStateHandler?.getClineMessages() ?? []
-
-		if (msgs.length > this.lastMsgCount) {
-			const diff = msgs.slice(this.lastMsgCount)
-			this.lastMsgCount = msgs.length
-			return diff
-		}
-
-		return []
-	}
-
-	/** Prompt metnini oluşturur */
-	private buildTaskPrompt(t: GostergeTask): string {
-		const lines = [
-			t.description,
-			"",
-			"Görev Detayları:",
-			`- Başlık: ${t.title}`,
-			t.jiraTicket ? `- JIRA: ${t.jiraTicket}` : "",
-			t.priority ? `- Öncelik: ${t.priority}` : "",
-			t.tags?.length ? `- Etiketler: ${t.tags.join(", ")}` : "",
-			t.estimatedTime ? `- Tahmini süre: ${t.estimatedTime} dk` : "",
-			"",
-			"Lütfen kod kalitesine ve testlere özen göster.",
-		]
-		return lines.filter(Boolean).join("\n")
-	}
-
-	/* ------------------------------------------------------------------ */
-	/* Temizlik                                                           */
-	/* ------------------------------------------------------------------ */
-
-	/** ClineIntegration nesnesini temiz kapatır */
-	dispose(): void {
-		if (this.poller) clearInterval(this.poller)
-		this.poller = null
-	}
-}
 
 /* ------------------------------------------------------------------ */
 /* 7. Task Yöneticisi - Ana Orkestrasyon                               */
@@ -662,7 +515,7 @@ class TaskManager {
 	private healthCheckInterval: NodeJS.Timeout | null = null
 	private abortController: AbortController | null = null
 	private lastProgressUpdate = 0
-	private lastProgressPercent: number = 0 // Added
+	private lastProgressPercent: number = 0
 
 	private queue = Promise.resolve() // Add queue
 
@@ -801,23 +654,37 @@ class TaskManager {
 			message: "Cline görevi analiz ediyor...",
 		})
 
-		// Cline mesajlarını dinle
+		// Create a watchdog to monitor Cline's progress
+		const watchdog = new Watchdog(this.cline, this.config, this.logger)
+
+		// Cline mesajlarını dinle (bu handler Watchdog'dan da mesaj alacak)
 		const messageDisposable = this.cline.onMessage(async (msg: ClineMessage) => {
 			await this.handleClineMessage(task.id, msg)
 		})
+
+		// Periyodik olarak Cline'dan mesajları çek ve Watchdog'a ilet
+		const pollIntervalId = setInterval(() => {
+			this.cline.pollAndDispatchMessages()
+		}, this.config.pollInterval) // Use configured pollInterval
 
 		try {
 			// Görevi başlat
 			await this.cline.startTask(task)
 
-			// Tamamlanmasını bekle (timeout ile)
-			await this.waitForCompletion(task.id, this.abortController!.signal) // Pass signal
+			// Watchdog'ın sonuçlanmasını bekle
+			await watchdog.waitForResult(this.abortController!.signal)
 		} finally {
 			messageDisposable.dispose()
+			clearInterval(pollIntervalId) // Stop polling
+			watchdog.dispose() // Ensure watchdog resources are cleaned up
 		}
 	}
 
 	private async handleClineMessage(taskId: UUID, message: any): Promise<void> {
+		// 🚫 Otomatik modda soru sormak yasak → hemen hata fırlat
+		if (message.ask) {
+			throw new GostergeError(`Cline interaktif soru sordu: ${message.ask}`, "cline")
+		}
 		// Progress hesapla
 		const percent = this.calculateProgress(message)
 		const progressMessage = this.getProgressMessage(message)
@@ -854,9 +721,13 @@ class TaskManager {
 
 		const calculatedPercent = 35 // Default
 		if (message.type === "waiting") {
-			return Math.max(this.lastProgressPercent, calculatedPercent)
+			this.lastProgressUpdate = Date.now()
+			this.lastProgressPercent = Math.max(this.lastProgressPercent, 35)
+			return this.lastProgressPercent
 		}
-		this.lastProgressPercent = calculatedPercent // Update lastProgressPercent for other message types
+
+		this.lastProgressPercent = calculatedPercent
+		this.lastProgressUpdate = Date.now()
 		return calculatedPercent
 	}
 
@@ -877,57 +748,6 @@ class TaskManager {
 		if (message.testsPassed) details.testsPassed = message.testsPassed
 
 		return Object.keys(details).length > 0 ? details : undefined
-	}
-
-	private async waitForCompletion(taskId: UUID, signal: AbortSignal): Promise<void> {
-		const startTime = Date.now()
-		const checkInterval = 1000 // 1 saniye
-
-		return new Promise((resolve, reject) => {
-			const timer = setInterval(async () => {
-				// Renamed intervalId to timer
-				// Abort kontrolü
-				if (signal.aborted) {
-					// Use passed signal
-					clearInterval(timer)
-					return reject(new GostergeError("Aborted", "timeout")) // Use GostergeError
-				}
-
-				// Tamamlanma kontrolü
-				if (this.cline.isTaskComplete()) {
-					clearInterval(timer)
-					return resolve()
-				}
-
-				// Hata kontrolü
-				if (this.cline.isTaskAborted()) {
-					clearInterval(timer)
-					return reject(new GostergeError("Cline görevi iptal etti", "cline")) // Use GostergeError
-				}
-
-				// Timeout kontrolü
-				const elapsed = Date.now() - startTime
-				if (elapsed > this.config.taskTimeout) {
-					clearInterval(timer)
-					return reject(
-						new GostergeError(`Görev zaman aşımına uğradı (${this.config.taskTimeout / 60000} dk)`, "timeout"),
-					) // Use GostergeError
-				}
-
-				// Her 10 saniyede bir durum güncellemesi
-				if (Date.now() - this.lastProgressUpdate >= 10_000) {
-					this.lastProgressUpdate = Date.now()
-					const remainingTime = Math.ceil((this.config.taskTimeout - elapsed) / 60000)
-					const currentProgress = this.calculateProgress({ type: "waiting" })
-					this.lastProgressPercent = Math.max(this.lastProgressPercent, currentProgress) // Update lastProgressPercent
-					await this.taskService.progress(taskId, {
-						percent: this.lastProgressPercent, // Use lastProgressPercent
-						message: `${this.getTaskLogPrefix()}Cline çalışıyor... (${remainingTime} dk kaldı)`,
-					})
-				}
-			}, checkInterval)
-			signal.addEventListener("abort", () => clearInterval(timer)) // Add abort event listener
-		})
 	}
 
 	private async finalizeTask(task: GostergeTask): Promise<void> {
@@ -993,6 +813,10 @@ class TaskManager {
 
 		const e = err instanceof GostergeError ? err : new GostergeError((err as Error).message, "internal")
 
+		// (Opsiyonel) daha görünür log
+		if (e.kind === "cline" && /sessiz kaldı/.test(e.message)) {
+			this.logger.warn(`${this.getTaskLogPrefix()}⌛ Sessizlik zaman aşımı tetiklendi`)
+		}
 		this.logger.error(`${this.getTaskLogPrefix()}${e.kind.toUpperCase()} → ${e.message}`)
 		if (e.stack) {
 			this.logger.error(`${this.getTaskLogPrefix()}Stack: ${e.stack}`)

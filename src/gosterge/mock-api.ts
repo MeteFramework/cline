@@ -7,7 +7,7 @@
  * mock API endpoint'leri sağlar.
  *********************************************************************/
 
-import { GostergeTask, TaskProgress, TaskResult, TaskFailure } from "./index"
+import type { GostergeTask, TaskProgress, TaskResult, TaskFailure } from "./index"
 
 // Mock veri depoları
 let mockTasks: GostergeTask[] = []
@@ -25,7 +25,7 @@ function initializeMockTasks() {
 			description:
 				"Kullanıcıların oturum açarken 'Beni Hatırla' seçeneğini işaretleyebilmeleri için login formuna checkbox eklenecek. Bu özellik localStorage kullanarak kullanıcı bilgilerini güvenli şekilde saklayacak.",
 			repoUrl: "https://bitbucket.bulut.ai/scm/gos/gosterge.git",
-			branch: "feature/remember-me-checkbox",
+			branch: "feature/remember-me-checkbox-test123",
 			priority: "medium",
 			estimatedTime: 45,
 			tags: ["frontend", "authentication", "ui"],

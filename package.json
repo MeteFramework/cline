@@ -354,6 +354,11 @@
 					"type": "string",
 					"default": "dev",
 					"description": "The base branch name to use for creating new feature branches in Gosterge."
+				},
+				"gosterge.stallTimeout": {
+					"type": "number",
+					"default": 120000,
+					"description": "Cline 2 dakika sessiz kalırsa görevi iptal eder (ms)."
 				}
 			}
 		}
