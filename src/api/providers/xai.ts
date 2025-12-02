@@ -12,12 +12,7 @@ interface XAIHandlerOptions {
 	xaiApiKey?: string
 	reasoningEffort?: string
 	apiModelId?: string
-}
-
-interface XAIHandlerOptions {
-	xaiApiKey?: string
-	reasoningEffort?: string
-	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class XAIHandler implements ApiHandler {
@@ -37,6 +32,9 @@ export class XAIHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.x.ai/v1",
 					apiKey: this.options.xaiApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error: any) {
 				throw new Error(`Error creating xAI client: ${error.message}`)

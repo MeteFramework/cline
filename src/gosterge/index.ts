@@ -18,6 +18,7 @@ import { GostergeError } from "./errors" // Import GostergeError
 import { Watchdog } from "./watchdog" // Import Watchdog
 import { ClineMessage, ClineIntegration } from "./cline" // Import ClineMessage and ClineIntegration from new file
 import { Buffer } from "buffer" // Import Buffer for dynamic remote name
+import { IssueControllerAPI } from "./issue-api"
 
 /* ------------------------------------------------------------------ */
 /* 1. Tip Tanımlamaları                                                */
@@ -82,6 +83,9 @@ type Change = {
 /* ------------------------------------------------------------------ */
 /* 2. Gösterge Veri Modelleri                                          */
 /* ------------------------------------------------------------------ */
+
+// GOSTERGE_CUSTOM_HEADERS artık headers.ts dosyasında tanımlı
+export { GOSTERGE_CUSTOM_HEADERS } from "./headers"
 
 export type UUID = string
 
@@ -154,19 +158,23 @@ interface GostergeConfig {
 	retryBaseDelay: number // Added
 	/** Cline’dan mesaj gelmezse iptal süresi (ms) */
 	stallTimeout: number
+	/** Yeni: mock yerine gerçek API kullanımı için anahtarlar */
+	useMockBackend?: boolean
+	defaultRepoUrl?: string
+	defaultBaseBranch?: string
 }
 
 function loadConfig(context: vscode.ExtensionContext): GostergeConfig {
 	const cfg = vscode.workspace.getConfiguration("gosterge")
 
-	// Mock API kullanıldığı için endpoint ve token'a gerek yok
-	const endpoint = "mock-api-endpoint"
-	const token = "mock-api-token"
+	// Artık gerçek endpoint varsayılanı localhost
+	const endpoint = cfg.get<string>("endpoint") ?? "http://localhost:5203/api"
+	const token = cfg.get<string>("token") ?? ""
 
 	return {
 		endpoint,
 		token,
-		pollInterval: cfg.get<number>("pollInterval") ?? 30_000,
+		pollInterval: cfg.get<number>("pollInterval") ?? 60_000,
 		taskTimeout: cfg.get<number>("taskTimeout") ?? 600_000, // 10 dakika
 		maxRetries: cfg.get<number>("maxRetries") ?? 3,
 		cleanWorkspace: cfg.get<boolean>("cleanWorkspace") ?? true,
@@ -178,6 +186,9 @@ function loadConfig(context: vscode.ExtensionContext): GostergeConfig {
 		logLevel: cfg.get<"debug" | "info" | "warn" | "error">("logLevel"), // Added
 		retryBaseDelay: cfg.get<number>("retryBaseDelay") ?? 5000, // Added
 		stallTimeout: cfg.get<number>("stallTimeout") ?? 120_000,
+		useMockBackend: cfg.get<boolean>("useMockBackend") ?? false,
+		defaultRepoUrl: cfg.get<string>("defaultRepoUrl") ?? undefined,
+		defaultBaseBranch: cfg.get<string>("defaultBaseBranch") ?? undefined,
 	}
 }
 
@@ -188,31 +199,66 @@ function loadConfig(context: vscode.ExtensionContext): GostergeConfig {
 import { mockAPI } from "./mock-api"
 import { execSync } from "child_process"
 
+/* Backend soyutlaması: mock ve gerçek aynı imzayı uygular */
+type BackendApi = {
+	getNextTask(): Promise<{ task: GostergeTask | null; status: number }>
+	updateProgress(taskId: string, progress: Omit<TaskProgress, "taskId" | "timestamp">): Promise<{ status: number }>
+	completeTask(taskId: string, result: Omit<TaskResult, "taskId">): Promise<{ status: number }>
+	failTask(taskId: string, failure: Omit<TaskFailure, "taskId">): Promise<{ status: number }>
+	health(): Promise<{ ok: boolean; status: number }>
+}
+
+/* Mock API'yi adaptörle aynı yüzeye getiriyoruz */
+class MockBackendAdapter implements BackendApi {
+	async getNextTask() {
+		return mockAPI.getNextTask()
+	}
+	async updateProgress(taskId: string, progress: Omit<TaskProgress, "taskId" | "timestamp">) {
+		return mockAPI.updateProgress(taskId, progress)
+	}
+	async completeTask(taskId: string, result: Omit<TaskResult, "taskId">) {
+		return mockAPI.completeTask(taskId, result)
+	}
+	async failTask(taskId: string, failure: Omit<TaskFailure, "taskId">) {
+		return mockAPI.failTask(taskId, failure)
+	}
+	async health() {
+		return mockAPI.health()
+	}
+}
+
 class TaskService {
 	private retryCount = new Map<UUID, number>()
+	private api: BackendApi
 
-	constructor(private config: GostergeConfig) {}
+	constructor(
+		private config: GostergeConfig,
+		private logger: Logger,
+		private storage: vscode.Memento,
+	) {
+		this.api = config.useMockBackend ? new MockBackendAdapter() : new IssueControllerAPI(config.endpoint, logger, storage)
+	}
 
 	async next(): Promise<GostergeTask | null> {
-		const { task, status } = await mockAPI.getNextTask()
+		const { task, status } = await this.api.getNextTask()
 		if (status === 204) return null
 		return task
 	}
 
 	async progress(taskId: UUID, progress: Omit<TaskProgress, "taskId" | "timestamp">): Promise<void> {
-		await mockAPI.updateProgress(taskId, progress)
+		await this.api.updateProgress(taskId, progress)
 	}
 
 	async complete(taskId: UUID, result: Omit<TaskResult, "taskId">): Promise<void> {
-		await mockAPI.completeTask(taskId, result)
+		await this.api.completeTask(taskId, result)
 	}
 
 	async fail(taskId: UUID, failure: Omit<TaskFailure, "taskId">): Promise<void> {
-		await mockAPI.failTask(taskId, failure)
+		await this.api.failTask(taskId, failure)
 	}
 
 	async health(): Promise<boolean> {
-		const { ok } = await mockAPI.health()
+		const { ok } = await this.api.health()
 		return ok
 	}
 
@@ -522,12 +568,13 @@ class TaskManager {
 
 	constructor(
 		config: GostergeConfig,
-		logger: Logger, // Change to logger
+		logger: Logger,
 		controller: Controller,
+		private storage: vscode.Memento,
 	) {
 		this.config = config
 		this.logger = logger // Assign logger
-		this.taskService = new TaskService(config)
+		this.taskService = new TaskService(config, logger, this.storage)
 		this.cline = new ClineIntegration(controller, logger) // Pass logger
 	}
 
@@ -730,9 +777,32 @@ class TaskManager {
 
 	private getProgressMessage(message: any): string {
 		if (message.text) return message.text
+
+		if (message.say == "api_req_started") return "Görev Prompu Hazırlanıyor ve AI İşlemleri"
+		if (message.say == "api_req_finished") return "AI işlemleri Tamamlanıyor."
+
+		// Türkçe eşleştirme sözlüğü
+		const TR: Record<string, string> = {
+			api_req_started: "API isteği başlatıldı",
+			api_req_finished: "API isteği tamamlandı",
+			tool_use: "Araç (tool) kullanılıyor",
+			completion_result: "Tamamlama sonucu hazır",
+			file_edit: "Dosya düzenleniyor",
+			test_run: "Testler çalıştırılıyor",
+			waiting: "Bekleniyor",
+		}
+
+		// Cline'ın 'say' alanı için Türkçe karşılık varsa onu kullan
+		if (message.say && TR[message.say]) return `Cline: ${TR[message.say]}`
 		if (message.say) return `Cline: ${message.say}`
+
+		// (Normalde 'ask' yakalanıp hata atılıyor; yine de düşerse)
 		if (message.ask) return `Cline soruyor: ${message.ask}`
+
+		// Tip için Türkçe karşılık varsa onu kullan
+		if (message.type && TR[message.type]) return `İşlem: ${TR[message.type]}`
 		if (message.type) return `İşlem: ${message.type}`
+
 		return "Cline çalışıyor..."
 	}
 
@@ -914,7 +984,12 @@ export function initializeGosterge(
 		logger.info(`⏱️ Task Timeout: ${config.taskTimeout / 60000}m`)
 
 		// Task manager oluştur
-		const taskManager = new TaskManager(config, logger, controller) // Pass logger
+		const taskManager = new TaskManager(
+			config,
+			logger,
+			controller,
+			context.workspaceState, // storage: per-workspace
+		)
 
 		// Başlat
 		taskManager

@@ -10,6 +10,7 @@ import { convertToR1Format } from "@api/transform/r1-format"
 interface SambanovaHandlerOptions {
 	sambanovaApiKey?: string
 	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class SambanovaHandler implements ApiHandler {
@@ -29,6 +30,9 @@ export class SambanovaHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.sambanova.ai/v1",
 					apiKey: this.options.sambanovaApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error: any) {
 				throw new Error(`Error creating SambaNova client: ${error.message}`)

@@ -10,6 +10,7 @@ interface MoonshotHandlerOptions {
 	moonshotApiKey?: string
 	moonshotApiLine?: string
 	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class MoonshotHandler implements ApiHandler {
@@ -27,6 +28,9 @@ export class MoonshotHandler implements ApiHandler {
 					baseURL:
 						this.options.moonshotApiLine === "china" ? "https://api.moonshot.cn/v1" : "https://api.moonshot.ai/v1",
 					apiKey: this.options.moonshotApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating Moonshot client: ${error.message}`)

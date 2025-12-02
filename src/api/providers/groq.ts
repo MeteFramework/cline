@@ -12,6 +12,7 @@ interface GroqHandlerOptions {
 	groqModelId?: string
 	groqModelInfo?: ModelInfo
 	apiModelId?: string // For backward compatibility
+	customHeaders?: Record<string, string>
 }
 
 // Model family definitions for enhanced behavior
@@ -93,6 +94,9 @@ export class GroqHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.groq.com/openai/v1",
 					apiKey: this.options.groqApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating Groq client: ${error.message}`)

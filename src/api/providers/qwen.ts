@@ -21,6 +21,7 @@ interface QwenHandlerOptions {
 	qwenApiLine?: QwenApiRegions
 	apiModelId?: string
 	thinkingBudgetTokens?: number
+	customHeaders?: Record<string, string>
 }
 
 export class QwenHandler implements ApiHandler {
@@ -50,6 +51,9 @@ export class QwenHandler implements ApiHandler {
 						? "https://dashscope.aliyuncs.com/compatible-mode/v1"
 						: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 					apiKey: this.options.qwenApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error: any) {
 				throw new Error(`Error creating Alibaba client: ${error.message}`)

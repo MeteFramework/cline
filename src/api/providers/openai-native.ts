@@ -12,6 +12,7 @@ interface OpenAiNativeHandlerOptions {
 	openAiNativeApiKey?: string
 	reasoningEffort?: string
 	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class OpenAiNativeHandler implements ApiHandler {
@@ -30,6 +31,9 @@ export class OpenAiNativeHandler implements ApiHandler {
 			try {
 				this.client = new OpenAI({
 					apiKey: this.options.openAiNativeApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error: any) {
 				throw new Error(`Error creating OpenAI client: ${error.message}`)

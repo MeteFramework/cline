@@ -11,6 +11,7 @@ interface HuggingFaceHandlerOptions {
 	huggingFaceApiKey?: string
 	huggingFaceModelId?: string
 	huggingFaceModelInfo?: ModelInfo
+	customHeaders?: Record<string, string>
 }
 
 export class HuggingFaceHandler implements ApiHandler {
@@ -34,6 +35,7 @@ export class HuggingFaceHandler implements ApiHandler {
 					apiKey: this.options.huggingFaceApiKey,
 					defaultHeaders: {
 						"User-Agent": "Cline/1.0",
+						...(this.options.customHeaders || {}),
 					},
 				})
 			} catch (error: any) {

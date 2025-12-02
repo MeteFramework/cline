@@ -10,6 +10,7 @@ interface HuaweiCloudMaaSHandlerOptions {
 	huaweiCloudMaasApiKey?: string
 	huaweiCloudMaasModelId?: string
 	huaweiCloudMaasModelInfo?: ModelInfo
+	customHeaders?: Record<string, string>
 }
 
 export class HuaweiCloudMaaSHandler implements ApiHandler {
@@ -28,6 +29,9 @@ export class HuaweiCloudMaaSHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.modelarts-maas.com/v1/",
 					apiKey: this.options.huaweiCloudMaasApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating Huawei Cloud MaaS client: ${error.message}`)

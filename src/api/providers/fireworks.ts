@@ -11,6 +11,7 @@ interface FireworksHandlerOptions {
 	fireworksModelId?: string
 	fireworksModelMaxCompletionTokens?: number
 	fireworksModelMaxTokens?: number
+	customHeaders?: Record<string, string>
 }
 
 export class FireworksHandler implements ApiHandler {
@@ -30,6 +31,9 @@ export class FireworksHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.fireworks.ai/inference/v1",
 					apiKey: this.options.fireworksApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating Fireworks client: ${error.message}`)

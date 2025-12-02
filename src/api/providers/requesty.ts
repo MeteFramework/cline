@@ -13,6 +13,7 @@ interface RequestyHandlerOptions {
 	thinkingBudgetTokens?: number
 	requestyModelId?: string
 	requestyModelInfo?: ModelInfo
+	customHeaders?: Record<string, string>
 }
 
 // Requesty usage includes an extra field for Anthropic use cases.
@@ -45,6 +46,7 @@ export class RequestyHandler implements ApiHandler {
 					defaultHeaders: {
 						"HTTP-Referer": "https://cline.bot",
 						"X-Title": "Cline",
+						...(this.options.customHeaders || {}),
 					},
 				})
 			} catch (error: any) {

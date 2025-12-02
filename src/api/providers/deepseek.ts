@@ -11,6 +11,7 @@ import { convertToR1Format } from "../transform/r1-format"
 interface DeepSeekHandlerOptions {
 	deepSeekApiKey?: string
 	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class DeepSeekHandler implements ApiHandler {
@@ -30,6 +31,9 @@ export class DeepSeekHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.deepseek.com/v1",
 					apiKey: this.options.deepSeekApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating DeepSeek client: ${error.message}`)

@@ -9,6 +9,7 @@ import { withRetry } from "../retry"
 interface LmStudioHandlerOptions {
 	lmStudioBaseUrl?: string
 	lmStudioModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class LmStudioHandler implements ApiHandler {
@@ -25,6 +26,9 @@ export class LmStudioHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: (this.options.lmStudioBaseUrl || "http://localhost:1234") + "/v1",
 					apiKey: "noop",
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating LM Studio client: ${error.message}`)

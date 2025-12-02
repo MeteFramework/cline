@@ -9,6 +9,7 @@ import { withRetry } from "../retry"
 interface DoubaoHandlerOptions {
 	doubaoApiKey?: string
 	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class DoubaoHandler implements ApiHandler {
@@ -27,6 +28,9 @@ export class DoubaoHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://ark.cn-beijing.volces.com/api/v3/",
 					apiKey: this.options.doubaoApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating Doubao client: ${error.message}`)

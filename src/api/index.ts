@@ -1,6 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import { ApiConfiguration, ModelInfo, QwenApiRegions } from "../shared/api"
 import { AnthropicHandler } from "./providers/anthropic"
+import { GOSTERGE_CUSTOM_HEADERS } from "../gosterge/index"
 import { AwsBedrockHandler } from "./providers/bedrock"
 import { OpenRouterHandler } from "./providers/openrouter"
 import { VertexHandler } from "./providers/vertex"
@@ -48,6 +49,42 @@ function createHandlerForProvider(
 	options: Omit<ApiConfiguration, "apiProvider">,
 	mode: Mode,
 ): ApiHandler {
+	// Gösterge'den gelen custom header'ları al
+	// Boş olmayan header'ları filtrele
+	const gostergeHeaders: Record<string, string> = {}
+	if (GOSTERGE_CUSTOM_HEADERS.AtrTaskId) {
+		gostergeHeaders.AtrTaskId = GOSTERGE_CUSTOM_HEADERS.AtrTaskId
+	}
+	if (GOSTERGE_CUSTOM_HEADERS.clineWorkerId) {
+		gostergeHeaders.clineWorkerId = GOSTERGE_CUSTOM_HEADERS.clineWorkerId
+	}
+
+	// OpenAI uyumlu provider'ların listesi
+	const openAiCompatibleProviders = [
+		"openai",
+		"openrouter",
+		"requesty",
+		"litellm",
+		"groq",
+		"deepseek",
+		"fireworks",
+		"together",
+		"qwen",
+		"doubao",
+		"xai",
+		"sambanova",
+		"nebius",
+		"moonshot",
+		"huggingface",
+		"huawei-cloud-maas",
+		"lmstudio",
+		"openai-native",
+		"cline",
+	]
+
+	// Eğer provider OpenAI uyumluysa ve header'lar varsa, customHeaders olarak hazırla
+	const shouldAddHeaders = openAiCompatibleProviders.includes(apiProvider || "") && Object.keys(gostergeHeaders).length > 0
+
 	switch (apiProvider) {
 		case "anthropic":
 			return new AnthropicHandler({
@@ -66,6 +103,7 @@ function createHandlerForProvider(
 				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
 				thinkingBudgetTokens:
 					mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "bedrock":
 			return new AwsBedrockHandler({
@@ -104,7 +142,9 @@ function createHandlerForProvider(
 				openAiApiKey: options.openAiApiKey,
 				openAiBaseUrl: options.openAiBaseUrl,
 				azureApiVersion: options.azureApiVersion,
-				openAiHeaders: options.openAiHeaders,
+				openAiHeaders: shouldAddHeaders
+					? { ...(options.openAiHeaders || {}), ...gostergeHeaders }
+					: options.openAiHeaders,
 				openAiModelId: mode === "plan" ? options.planModeOpenAiModelId : options.actModeOpenAiModelId,
 				openAiModelInfo: mode === "plan" ? options.planModeOpenAiModelInfo : options.actModeOpenAiModelInfo,
 				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
@@ -120,6 +160,7 @@ function createHandlerForProvider(
 			return new LmStudioHandler({
 				lmStudioBaseUrl: options.lmStudioBaseUrl,
 				lmStudioModelId: mode === "plan" ? options.planModeLmStudioModelId : options.actModeLmStudioModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "gemini":
 			return new GeminiHandler({
@@ -137,11 +178,13 @@ function createHandlerForProvider(
 				openAiNativeApiKey: options.openAiNativeApiKey,
 				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "deepseek":
 			return new DeepSeekHandler({
 				deepSeekApiKey: options.deepSeekApiKey,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "requesty":
 			return new RequestyHandler({
@@ -151,6 +194,7 @@ function createHandlerForProvider(
 					mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
 				requestyModelId: mode === "plan" ? options.planModeRequestyModelId : options.actModeRequestyModelId,
 				requestyModelInfo: mode === "plan" ? options.planModeRequestyModelInfo : options.actModeRequestyModelInfo,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "fireworks":
 			return new FireworksHandler({
@@ -158,11 +202,13 @@ function createHandlerForProvider(
 				fireworksModelId: mode === "plan" ? options.planModeFireworksModelId : options.actModeFireworksModelId,
 				fireworksModelMaxCompletionTokens: options.fireworksModelMaxCompletionTokens,
 				fireworksModelMaxTokens: options.fireworksModelMaxTokens,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "together":
 			return new TogetherHandler({
 				togetherApiKey: options.togetherApiKey,
 				togetherModelId: mode === "plan" ? options.planModeTogetherModelId : options.actModeTogetherModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "qwen":
 			return new QwenHandler({
@@ -172,11 +218,13 @@ function createHandlerForProvider(
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
 				thinkingBudgetTokens:
 					mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "doubao":
 			return new DoubaoHandler({
 				doubaoApiKey: options.doubaoApiKey,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "mistral":
 			return new MistralHandler({
@@ -198,6 +246,7 @@ function createHandlerForProvider(
 				openRouterProviderSorting: options.openRouterProviderSorting,
 				openRouterModelId: mode === "plan" ? options.planModeOpenRouterModelId : options.actModeOpenRouterModelId,
 				openRouterModelInfo: mode === "plan" ? options.planModeOpenRouterModelInfo : options.actModeOpenRouterModelInfo,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "litellm":
 			return new LiteLlmHandler({
@@ -209,12 +258,14 @@ function createHandlerForProvider(
 					mode === "plan" ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
 				liteLlmUsePromptCache: options.liteLlmUsePromptCache,
 				taskId: options.taskId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "moonshot":
 			return new MoonshotHandler({
 				moonshotApiKey: options.moonshotApiKey,
 				moonshotApiLine: options.moonshotApiLine,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "huggingface":
 			return new HuggingFaceHandler({
@@ -222,11 +273,13 @@ function createHandlerForProvider(
 				huggingFaceModelId: mode === "plan" ? options.planModeHuggingFaceModelId : options.actModeHuggingFaceModelId,
 				huggingFaceModelInfo:
 					mode === "plan" ? options.planModeHuggingFaceModelInfo : options.actModeHuggingFaceModelInfo,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "nebius":
 			return new NebiusHandler({
 				nebiusApiKey: options.nebiusApiKey,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "asksage":
 			return new AskSageHandler({
@@ -239,11 +292,13 @@ function createHandlerForProvider(
 				xaiApiKey: options.xaiApiKey,
 				reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "sambanova":
 			return new SambanovaHandler({
 				sambanovaApiKey: options.sambanovaApiKey,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "cerebras":
 			return new CerebrasHandler({
@@ -256,6 +311,7 @@ function createHandlerForProvider(
 				groqModelId: mode === "plan" ? options.planModeGroqModelId : options.actModeGroqModelId,
 				groqModelInfo: mode === "plan" ? options.planModeGroqModelInfo : options.actModeGroqModelInfo,
 				apiModelId: mode === "plan" ? options.planModeApiModelId : options.actModeApiModelId,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		case "sapaicore":
 			return new SapAiCoreHandler({
@@ -280,6 +336,7 @@ function createHandlerForProvider(
 					mode === "plan" ? options.planModeHuaweiCloudMaasModelId : options.actModeHuaweiCloudMaasModelId,
 				huaweiCloudMaasModelInfo:
 					mode === "plan" ? options.planModeHuaweiCloudMaasModelInfo : options.actModeHuaweiCloudMaasModelInfo,
+				customHeaders: shouldAddHeaders ? gostergeHeaders : undefined,
 			})
 		default:
 			return new AnthropicHandler({

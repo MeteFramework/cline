@@ -17,15 +17,7 @@ interface OpenRouterHandlerOptions {
 	openRouterProviderSorting?: string
 	reasoningEffort?: string
 	thinkingBudgetTokens?: number
-}
-
-interface OpenRouterHandlerOptions {
-	openRouterApiKey?: string
-	openRouterModelId?: string
-	openRouterModelInfo?: ModelInfo
-	openRouterProviderSorting?: string
-	reasoningEffort?: string
-	thinkingBudgetTokens?: number
+	customHeaders?: Record<string, string>
 }
 
 export class OpenRouterHandler implements ApiHandler {
@@ -49,6 +41,7 @@ export class OpenRouterHandler implements ApiHandler {
 					defaultHeaders: {
 						"HTTP-Referer": "https://cline.bot", // Optional, for including your app on openrouter.ai rankings.
 						"X-Title": "Cline", // Optional. Shows in rankings on openrouter.ai.
+						...(this.options.customHeaders || {}),
 					},
 				})
 			} catch (error: any) {

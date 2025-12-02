@@ -22,6 +22,7 @@ interface ClineHandlerOptions {
 	openRouterModelId?: string
 	openRouterModelInfo?: ModelInfo
 	clineAccountId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class ClineHandler implements ApiHandler {
@@ -53,6 +54,7 @@ export class ClineHandler implements ApiHandler {
 						"X-Title": "Cline",
 						"X-Task-ID": this.options.taskId || "",
 						"X-Cline-Version": extensionVersion,
+						...(this.options.customHeaders || {}),
 					},
 				})
 			} catch (error: any) {

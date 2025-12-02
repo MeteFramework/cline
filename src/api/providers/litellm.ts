@@ -14,6 +14,7 @@ interface LiteLlmHandlerOptions {
 	thinkingBudgetTokens?: number
 	liteLlmUsePromptCache?: boolean
 	taskId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class LiteLlmHandler implements ApiHandler {
@@ -33,6 +34,9 @@ export class LiteLlmHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: this.options.liteLlmBaseUrl || "http://localhost:4000",
 					apiKey: this.options.liteLlmApiKey || "noop",
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating LiteLLM client: ${error.message}`)

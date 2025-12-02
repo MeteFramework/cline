@@ -10,6 +10,7 @@ import { convertToR1Format } from "@api/transform/r1-format"
 interface TogetherHandlerOptions {
 	togetherApiKey?: string
 	togetherModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class TogetherHandler implements ApiHandler {
@@ -29,6 +30,9 @@ export class TogetherHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.together.xyz/v1",
 					apiKey: this.options.togetherApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error: any) {
 				throw new Error(`Error creating Together client: ${error.message}`)

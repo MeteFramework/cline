@@ -10,6 +10,7 @@ import { nebiusDefaultModelId, nebiusModels, type ModelInfo, type NebiusModelId 
 interface NebiusHandlerOptions {
 	nebiusApiKey?: string
 	apiModelId?: string
+	customHeaders?: Record<string, string>
 }
 
 export class NebiusHandler implements ApiHandler {
@@ -26,6 +27,9 @@ export class NebiusHandler implements ApiHandler {
 				this.client = new OpenAI({
 					baseURL: "https://api.studio.nebius.ai/v1",
 					apiKey: this.options.nebiusApiKey,
+					defaultHeaders: {
+						...(this.options.customHeaders || {}),
+					},
 				})
 			} catch (error) {
 				throw new Error(`Error creating Nebius client: ${error.message}`)
