@@ -141,18 +141,25 @@ export class IssueControllerAPI {
 			StepName: progress.message,
 			StepPercent: progress.percent,
 			StepFinishedDate: new Date().toISOString(),
-			StepIsSuccess: progress.percent >= 100,
+			StepIsSuccess: progress.percent >= 100 && !progress.isError,
 			StepNo: this.stepNo,
 			...(progress.details ?? {}),
+			// Hata durumunda ek bilgiler
+			...(progress.isError
+				? {
+						isError: true,
+						errorMessage: progress.errorMessage,
+					}
+				: {}),
 		}
 
 		const req: ClineProggressRequest = {
 			clineWorkerId: this.clineWorkerId!,
 			atrTaskId: Number(taskId),
 			message: JSON.stringify(messagePayload),
-			// IsFinished/IsError şimdilik server tarafında işlenmiyor denmiş,
-			// sade bırakıyoruz. Gerekirse açarız:
-			// IsFinished: progress.percent >= 100,
+			isFinished: progress.percent >= 100,
+			isError: progress.isError ?? false,
+			errorMessage: progress.errorMessage ?? null,
 		}
 
 		const resp = await fetch(`${this.baseUrl}/issue/ClineProgress`, {
@@ -177,32 +184,37 @@ export class IssueControllerAPI {
 
 	async failTask(taskId: string, failure: Omit<TaskFailure, "taskId">): Promise<{ status: number }> {
 		if (!this.clineWorkerId) await this.ping()
+		this.stepNo += 1
 
 		const messagePayload = {
 			StepName: "failed",
 			StepPercent: 0,
 			StepFinishedDate: new Date().toISOString(),
 			StepIsSuccess: false,
-			StepNo: this.stepNo + 1,
+			StepNo: this.stepNo,
 			errorType: failure.errorType ?? "unknown",
 			reason: failure.reason,
+			recoverable: failure.recoverable ?? false,
+			...(failure.stack ? { stack: failure.stack } : {}),
 		}
 
 		const req: ClineProggressRequest = {
 			clineWorkerId: this.clineWorkerId!,
 			atrTaskId: Number(taskId),
 			message: JSON.stringify(messagePayload),
+			isFinished: false,
 			isError: true,
 			errorMessage: failure.reason,
 		}
 
-		const resp = await fetch(`${this.baseUrl}/issue/progress`, {
+		// updateProgress ile aynı endpoint'i kullan (tutarlılık için)
+		const resp = await fetch(`${this.baseUrl}/issue/ClineProgress`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(req),
 		})
 		if (!resp.ok) {
-			throw new GostergeError(`issue/progress (fail) failed: ${resp.status} ${await resp.text()}`, "api")
+			throw new GostergeError(`issue/ClineProgress (fail) failed: ${resp.status} ${await resp.text()}`, "api")
 		}
 		return { status: resp.status }
 	}

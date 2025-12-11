@@ -116,7 +116,31 @@ export class ClineIntegration implements vscode.Disposable {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Cline mesajlarını (webview state’inden) getirir.
+	 * Cline'ın sorduğu soruya otomatik cevap gönderir
+	 * @param askType Soru tipi (resume_task, followup, vb.)
+	 * @param autoResponse Otomatik cevap metni (opsiyonel)
+	 */
+	async sendAutoResponse(askType: string, autoResponse?: string): Promise<void> {
+		if (!this.controller.task) {
+			this.logger.warn("ClineIntegration: Aktif görev yok, otomatik cevap gönderilemedi")
+			return
+		}
+
+		// resume_task için "yesButtonClicked" gönder
+		if (askType === "resume_task" || askType === "resume_completed_task") {
+			this.logger.info(`🤖 Otomatik cevap: ${askType} → yesButtonClicked`)
+			await this.controller.task.handleWebviewAskResponse("yesButtonClicked", "", [])
+			return
+		}
+
+		// Diğer soru tipleri için otomatik mesaj gönder
+		const responseText = autoResponse || "Devam et, en iyi kararı sen ver.Tüm yetkiler var sende."
+		this.logger.info(`🤖 Otomatik cevap: ${askType} → "${responseText}"`)
+		await this.controller.task.handleWebviewAskResponse("messageResponse", responseText, [])
+	}
+
+	/**
+	 * Cline mesajlarını (webview state'inden) getirir.
 	 * Yalnızca yeni gelen(ler)i döndürür.
 	 */
 	private getNewMessages(): ClineMessage[] {
@@ -134,19 +158,17 @@ export class ClineIntegration implements vscode.Disposable {
 	/** Prompt metnini oluşturur */
 	private buildTaskPrompt(t: GostergeTask): string {
 		const lines = [
-			t.description,
 			"",
-			"Görev Detayları:",
-			`- Başlık: ${t.title}`,
-			t.jiraTicket ? `- JIRA: ${t.jiraTicket}` : "",
-			t.priority ? `- Öncelik: ${t.priority}` : "",
+			"Task Info :",
+			`- Title: ${t.title}`,
+			"- Description : " + t.description,
 			t.tags?.length ? `- Etiketler: ${t.tags.join(", ")}` : "",
 			t.estimatedTime ? `- Tahmini süre: ${t.estimatedTime} dk` : "",
 			"",
-			"**Sistem talimatı**:",
-			"- Bu oturum *tamamen otomatiktir*. Kullanıcıya soru sorma.",
-			"- Gerekli bilgiyi kendin çıkar; bulamazsan görevi hata ile bitir.",
-			"Lütfen kod kalitesine ve testlere özen göster.",
+			"System instruction:",
+			"- This session is fully automated. Do not ask questions to the user.",
+			"- Extract necessary information yourself; if unable to find it, terminate the task with an error.",
+			"Please pay attention to code quality and tests.",
 		]
 		return lines.filter(Boolean).join("\n")
 	}

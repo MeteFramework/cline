@@ -9,6 +9,12 @@ interface GostergeConfig {
 }
 
 /**
+ * Completion check callback type
+ * Returns true if task appears to be completed (even without completion_result message)
+ */
+type CompletionCheckCallback = () => Promise<boolean>
+
+/**
  * Ensures that the given promise, if it rejects, first attempts to cancel the Cline task
  * before re-throwing the error. This is specifically for stall errors.
  */
@@ -37,6 +43,10 @@ export class Watchdog implements vscode.Disposable {
 	private stallIntervalId: NodeJS.Timeout | undefined
 	private taskTimeoutId: NodeJS.Timeout | undefined
 	private completionDisposable: vscode.Disposable | undefined
+	private lastError: GostergeError | null = null
+	private onErrorCallback: ((error: GostergeError) => void) | null = null
+	private completionCheckCallback: CompletionCheckCallback | null = null
+	private completionCheckIntervalId: NodeJS.Timeout | undefined
 
 	constructor(
 		private cline: ClineIntegration,
@@ -51,6 +61,21 @@ export class Watchdog implements vscode.Disposable {
 			// This is where handleClineMessage logic from TaskManager should potentially be called
 			// or the message passed through to TaskManager's handler.
 		})
+	}
+
+	/**
+	 * Error callback'i kaydeder. Watchdog dispose olduğunda veya hata oluştuğunda çağrılır.
+	 */
+	setErrorCallback(callback: (error: GostergeError) => void): void {
+		this.onErrorCallback = callback
+	}
+
+	/**
+	 * Completion check callback'i kaydeder.
+	 * Bu callback, completion_result mesajı gelmese bile görevin tamamlanmış olup olmadığını kontrol eder.
+	 */
+	setCompletionCheckCallback(callback: CompletionCheckCallback): void {
+		this.completionCheckCallback = callback
 	}
 
 	/**
@@ -100,7 +125,7 @@ export class Watchdog implements vscode.Disposable {
 			)
 		})
 
-		// Promise for task completion
+		// Promise for task completion (completion_result mesajı)
 		const completionPromise = new Promise<void>((resolve) => {
 			this.completionDisposable = this.cline.onMessage((msg: ClineMessage) => {
 				if (msg.say === "completion_result" || msg.ask === "completion_result") {
@@ -111,6 +136,44 @@ export class Watchdog implements vscode.Disposable {
 					resolve()
 				}
 			})
+		})
+
+		// Promise for implicit completion check (completion_result gelmese bile)
+		const implicitCompletionPromise = new Promise<void>((resolve) => {
+			if (!this.completionCheckCallback) {
+				// Callback yoksa, bu promise hiç resolve olmaz (sonsuz bekler)
+				return
+			}
+
+			// Her 30 saniyede bir completion check yap
+			this.completionCheckIntervalId = setInterval(async () => {
+				try {
+					const isCompleted = await this.completionCheckCallback!()
+					if (isCompleted) {
+						this.logger.debug("Implicit completion detected (no completion_result message)")
+						if (this.completionCheckIntervalId) {
+							clearInterval(this.completionCheckIntervalId)
+							this.completionCheckIntervalId = undefined
+						}
+						resolve()
+					}
+				} catch (error) {
+					// Completion check hatası, log'la ama devam et
+					this.logger.debug(`Completion check error: ${error}`)
+				}
+			}, 30000) // 30 saniye
+
+			// Clean up interval if aborted
+			abortSig.addEventListener(
+				"abort",
+				() => {
+					if (this.completionCheckIntervalId) {
+						clearInterval(this.completionCheckIntervalId)
+						this.completionCheckIntervalId = undefined
+					}
+				},
+				{ once: true },
+			)
 		})
 
 		// Promise for user abortion
@@ -126,13 +189,30 @@ export class Watchdog implements vscode.Disposable {
 
 		try {
 			// Race all promises
+			// completionPromise veya implicitCompletionPromise resolve olursa → başarılı tamamlanma, catch'e düşmez
+			// Diğer promise'lar reject olursa → hata, catch'e düşer
 			await Promise.race([
-				completionPromise,
-				stalledCleanup(stallPromise, this.cline, this.logger), // Wrap stall promise for cleanup and pass logger
-				taskTimeoutPromise,
-				abortedPromise,
+				completionPromise, // ✅ Başarılı tamamlanma (completion_result mesajı)
+				implicitCompletionPromise, // ✅ Başarılı tamamlanma (implicit check)
+				stalledCleanup(stallPromise, this.cline, this.logger), // ❌ Stall hatası
+				taskTimeoutPromise, // ❌ Timeout hatası
+				abortedPromise, // ❌ Abort hatası
 			])
+			// Eğer buraya geldiysek, completionPromise resolve oldu (başarılı)
+			// Error callback çağrılmaz, sadece dispose edilir
+		} catch (error) {
+			// Sadece hata durumlarında buraya düşer (stall, timeout, abort)
+			// completionPromise resolve olduğunda buraya düşmez
+			if (error instanceof GostergeError) {
+				this.lastError = error
+				// Error callback'i çağır (sadece hata durumlarında)
+				if (this.onErrorCallback) {
+					this.onErrorCallback(error)
+				}
+			}
+			throw error // Hata'yı tekrar fırlat
 		} finally {
+			// Her durumda (başarılı veya hatalı) dispose edilir
 			this.dispose() // Ensure all resources are cleaned up
 		}
 	}
@@ -155,6 +235,10 @@ export class Watchdog implements vscode.Disposable {
 		if (this.completionDisposable) {
 			this.completionDisposable.dispose()
 			this.completionDisposable = undefined
+		}
+		if (this.completionCheckIntervalId) {
+			clearInterval(this.completionCheckIntervalId)
+			this.completionCheckIntervalId = undefined
 		}
 		this.logger.debug("Watchdog disposed.")
 	}

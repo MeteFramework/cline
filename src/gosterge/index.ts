@@ -108,6 +108,8 @@ export interface TaskProgress {
 	percent: number
 	message: string
 	timestamp: number
+	isError?: boolean
+	errorMessage?: string
 	details?: {
 		filesChanged?: number
 		testsRun?: number
@@ -246,7 +248,41 @@ class TaskService {
 	}
 
 	async progress(taskId: UUID, progress: Omit<TaskProgress, "taskId" | "timestamp">): Promise<void> {
-		await this.api.updateProgress(taskId, progress)
+		// Network hatalarını handle et - retry mekanizması ile
+		let lastError: Error | null = null
+		const maxRetries = 3
+		const retryDelay = 1000 // 1 saniye
+
+		for (let attempt = 0; attempt < maxRetries; attempt++) {
+			try {
+				await this.api.updateProgress(taskId, progress)
+				return // Başarılı
+			} catch (error: any) {
+				lastError = error
+				const isNetworkError =
+					error?.message?.includes("fetch") ||
+					error?.message?.includes("network") ||
+					error?.message?.includes("ECONNREFUSED") ||
+					error?.message?.includes("ETIMEDOUT") ||
+					error?.kind === "api"
+
+				if (isNetworkError && attempt < maxRetries - 1) {
+					// Network hatası ve retry yapılabilir
+					this.logger.warn(
+						`Progress bildirimi başarısız (attempt ${attempt + 1}/${maxRetries}), ${retryDelay}ms sonra tekrar deneniyor...`,
+					)
+					await delay(retryDelay * (attempt + 1)) // Exponential backoff
+					continue
+				}
+				// Network hatası değil veya max retry aşıldı
+				throw error
+			}
+		}
+
+		// Tüm retry'lar başarısız oldu
+		if (lastError) {
+			throw lastError
+		}
 	}
 
 	async complete(taskId: UUID, result: Omit<TaskResult, "taskId">): Promise<void> {
@@ -701,6 +737,61 @@ class TaskManager {
 		// Create a watchdog to monitor Cline's progress
 		const watchdog = new Watchdog(this.cline, this.config, this.logger)
 
+		// Watchdog hata callback'i kaydet
+		watchdog.setErrorCallback(async (error: GostergeError) => {
+			// Watchdog'dan hata geldiğinde progress'e bildir
+			this.logger.error(`${this.getTaskLogPrefix()}🚨 Watchdog hatası: ${error.message}`)
+			await this.taskService.progress(task.id, {
+				percent: this.lastProgressPercent || 50,
+				message: `Hata tespit edildi: ${error.message}`,
+				isError: true,
+				errorMessage: error.message,
+			})
+		})
+
+		// Watchdog completion check callback'i kaydet
+		// completion_result mesajı gelmese bile görevin tamamlanmış olup olmadığını kontrol eder
+		watchdog.setCompletionCheckCallback(async (): Promise<boolean> => {
+			try {
+				// 1. Cline zaten tamamlandı mı kontrol et
+				if (this.cline.isTaskComplete()) {
+					this.logger.debug(`${this.getTaskLogPrefix()}✅ Cline görevi tamamlandı (isTaskComplete)`)
+					return true
+				}
+
+				// 2. Git değişiklikleri var mı kontrol et
+				const stats = await this.gitService.getChangeStats()
+				const hasChanges = stats.filesChanged > 0 || stats.linesAdded > 0 || stats.linesRemoved > 0
+
+				if (!hasChanges) {
+					// Değişiklik yok, henüz tamamlanmamış olabilir
+					return false
+				}
+
+				// 3. Son aktiviteden ne kadar süre geçti?
+				const timeSinceLastActivity = Date.now() - (this.lastProgressUpdate || Date.now())
+				const quietPeriod = 60000 // 1 dakika
+
+				// 4. Cline state kontrolü (streaming durdu mu?)
+				const clineState: any = this.cline["controller"]?.task?.taskState
+				const isStreaming = clineState?.isStreaming === true
+
+				// Değişiklik var + uzun süre sessizlik + streaming durdu → muhtemelen tamamlandı
+				if (hasChanges && timeSinceLastActivity > quietPeriod && !isStreaming) {
+					this.logger.info(
+						`${this.getTaskLogPrefix()}✅ Implicit completion detected: ${stats.filesChanged} files changed, ${Math.round(timeSinceLastActivity / 1000)}s quiet, streaming stopped`,
+					)
+					return true
+				}
+
+				return false
+			} catch (error: any) {
+				// Completion check hatası, false döndür (görev devam ediyor kabul et)
+				this.logger.debug(`${this.getTaskLogPrefix()}⚠️ Completion check error: ${error.message}`)
+				return false
+			}
+		})
+
 		// Cline mesajlarını dinle (bu handler Watchdog'dan da mesaj alacak)
 		const messageDisposable = this.cline.onMessage(async (msg: ClineMessage) => {
 			await this.handleClineMessage(task.id, msg)
@@ -711,12 +802,23 @@ class TaskManager {
 			this.cline.pollAndDispatchMessages()
 		}, this.config.pollInterval) // Use configured pollInterval
 
+		await this.taskService.progress(task.id, {
+			percent: 50,
+			message: "Cline görevi işliyor...",
+		})
+
 		try {
 			// Görevi başlat
 			await this.cline.startTask(task)
 
 			// Watchdog'ın sonuçlanmasını bekle
+			// completionPromise resolve olursa → başarılı, catch'e düşmez
+			// Hata durumlarında → catch'e düşer ve error callback çağrılır
 			await watchdog.waitForResult(this.abortController!.signal)
+		} catch (error) {
+			// Watchdog'dan gelen hatalar burada yakalanır
+			// Error callback zaten çağrılmış olacak, burada sadece fırlatıyoruz
+			throw error
 		} finally {
 			messageDisposable.dispose()
 			clearInterval(pollIntervalId) // Stop polling
@@ -725,85 +827,198 @@ class TaskManager {
 	}
 
 	private async handleClineMessage(taskId: UUID, message: any): Promise<void> {
-		// 🚫 Otomatik modda soru sormak yasak → hemen hata fırlat
-		if (message.ask) {
-			throw new GostergeError(`Cline interaktif soru sordu: ${message.ask}`, "cline")
+		// 🤖 Otomatik modda soru sorulduğunda veya buton çıktığında otomatik cevap gönder
+		// Tüm buton tiplerini kontrol et: ask, primaryButton, secondaryButton, vb.
+		const hasButton =
+			message.ask ||
+			message.primaryButton ||
+			message.secondaryButton ||
+			message.type === "button" ||
+			(message.text && /process anyway|continue|proceed|yes|no/i.test(message.text))
+
+		if (hasButton) {
+			const askType = message.ask || message.type || "unknown_button"
+			this.logger.info(`${this.getTaskLogPrefix()}❓ Cline buton/soru tespit edildi: ${askType}`)
+
+			try {
+				// Otomatik cevap gönder
+				if (message.ask) {
+					await this.cline.sendAutoResponse(askType, message.text)
+				} else {
+					// Ask tipi değilse, genel bir cevap gönder
+					await this.cline.sendAutoResponse("followup", "Devam et, en iyi kararı sen ver.")
+				}
+				this.logger.info(`${this.getTaskLogPrefix()}✅ Otomatik cevap gönderildi: ${askType}`)
+
+				// Progress güncelle (soru-cevap döngüsü)
+				// await this.taskService.progress(taskId, {
+				// 	percent: this.lastProgressPercent, // Mevcut progress'i koru
+				// 	message: `Cline soru sordu, otomatik cevap verildi: ${askType}`,
+				// })
+
+				// Mesajı işlemeye devam et (hata fırlatma)
+				return
+			} catch (error: any) {
+				this.logger.error(`${this.getTaskLogPrefix()}❌ Otomatik cevap gönderilemedi: ${error.message}`)
+				// Hata durumunda eski davranışa geri dön (hata fırlat)
+				throw new GostergeError(`Cline interaktif soru sordu ve otomatik cevap gönderilemedi: ${askType}`, "cline")
+			}
 		}
+
+		// 🚨 Cline hata mesajlarını tespit et
+		if (this.isErrorMessage(message)) {
+			const errorText = this.extractErrorMessage(message)
+			const errorType = this.categorizeError(errorText)
+
+			this.logger.error(`${this.getTaskLogPrefix()}❌ Cline hatası: ${errorType} - ${errorText}`)
+
+			// Hata mesajını throw et ki handleTaskError retry mekanizmasını tetiklesin
+			throw new GostergeError(`Cline hatası: ${errorText}`, "cline")
+		}
+
 		// Progress hesapla
-		const percent = this.calculateProgress(message)
-		const progressMessage = this.getProgressMessage(message)
+		// const percent = this.calculateProgress(message)
+		// const progressMessage = this.getProgressMessage(message)
 
 		// Backend'e bildir
-		await this.taskService.progress(taskId, {
-			percent,
-			message: progressMessage,
-			details: this.extractProgressDetails(message),
-		})
+		// await this.taskService.progress(taskId, {
+		// 	percent,
+		// 	message: progressMessage,
+		// 	details: this.extractProgressDetails(message),
+		// })
 
 		// Log'a yaz
-		this.logger.info(`${this.getTaskLogPrefix()}📊 [%${percent}] ${progressMessage}`)
+		// this.logger.info(`${this.getTaskLogPrefix()}📊 [%${percent}] ${progressMessage}`)
 	}
 
-	private calculateProgress(message: any): number {
-		// Mesaj tipine göre progress hesapla
-		if (message.say === "completion_result" || message.ask === "completion_result") {
-			return 90
-		} else if (message.say === "api_req_started") {
-			return 40
-		} else if (message.say === "api_req_finished") {
-			return 50
-		} else if (message.say === "tool_use") {
-			return 60
-		} else if (message.type === "file_edit") {
-			return 70
-		} else if (message.type === "test_run") {
-			return 80
-		} else if (message.type === "waiting") {
-			// For "waiting" messages, compare with previous progress
-			return Math.max(this.lastProgressUpdate, 35) // Ensure progress doesn't go backward
+	// private calculateProgress(message: any): number {
+	// 	// Mesaj tipine göre progress hesapla
+	// 	if (message.say === "completion_result" || message.ask === "completion_result") {
+	// 		return 90
+	// 	} else if (message.say === "api_req_started") {
+	// 		return 40
+	// 	} else if (message.say === "api_req_finished") {
+	// 		return 50
+	// 	} else if (message.say === "tool_use") {
+	// 		return 60
+	// 	} else if (message.type === "file_edit") {
+	// 		return 70
+	// 	} else if (message.type === "test_run") {
+	// 		return 80
+	// 	} else if (message.type === "waiting") {
+	// 		// For "waiting" messages, compare with previous progress
+	// 		return Math.max(this.lastProgressUpdate, 35) // Ensure progress doesn't go backward
+	// 	}
+
+	// 	const calculatedPercent = 35 // Default
+	// 	if (message.type === "waiting") {
+	// 		this.lastProgressUpdate = Date.now()
+	// 		this.lastProgressPercent = Math.max(this.lastProgressPercent, 35)
+	// 		return this.lastProgressPercent
+	// 	}
+
+	// 	this.lastProgressPercent = calculatedPercent
+	// 	this.lastProgressUpdate = Date.now()
+	// 	return calculatedPercent
+	// }
+
+	// private getProgressMessage(message: any): string {
+	// 	//if (message.text) return message.text
+
+	// 	if (message.say == "api_req_started") return "Görev Prompu Hazırlanıyor ve AI İşlemleri"
+	// 	if (message.say == "api_req_finished") return "AI işlemleri Tamamlanıyor."
+
+	// 	// Türkçe eşleştirme sözlüğü
+	// 	const TR: Record<string, string> = {
+	// 		api_req_started: "API isteği başlatıldı",
+	// 		api_req_finished: "API isteği tamamlandı",
+	// 		tool_use: "Araç (tool) kullanılıyor",
+	// 		completion_result: "Tamamlama sonucu hazır",
+	// 		file_edit: "Dosya düzenleniyor",
+	// 		test_run: "Testler çalıştırılıyor",
+	// 		waiting: "Bekleniyor",
+	// 	}
+
+	// 	// Cline'ın 'say' alanı için Türkçe karşılık varsa onu kullan
+	// 	if (message.say && TR[message.say]) return `Cline: ${TR[message.say]}`
+	// 	if (message.say) return `Cline: ${message.say}`
+
+	// 	// (Normalde 'ask' yakalanıp hata atılıyor; yine de düşerse)
+	// 	if (message.ask) return `Cline soruyor: ${message.ask}`
+
+	// 	// Tip için Türkçe karşılık varsa onu kullan
+	// 	if (message.type && TR[message.type]) return `İşlem: ${TR[message.type]}`
+	// 	if (message.type) return `İşlem: ${message.type}`
+
+	// 	return "Cline çalışıyor..."
+	// }
+
+	/**
+	 * Mesajın hata mesajı olup olmadığını kontrol eder
+	 */
+	private isErrorMessage(message: any): boolean {
+		// Cline'ın error mesajları genellikle şu şekillerde gelir:
+		// - message.say === "error"
+		// - message.type === "error"
+		// - message.text içinde "Error" veya "error" kelimesi
+		// - "Writing File" gibi spesifik hata mesajları
+
+		if (message.say === "error" || message.type === "error") {
+			return true
 		}
 
-		const calculatedPercent = 35 // Default
-		if (message.type === "waiting") {
-			this.lastProgressUpdate = Date.now()
-			this.lastProgressPercent = Math.max(this.lastProgressPercent, 35)
-			return this.lastProgressPercent
+		if (message.text) {
+			const lowerText = message.text.toLowerCase()
+			// Yaygın hata mesajlarını kontrol et
+			if (
+				lowerText.includes("error") ||
+				lowerText.includes("writing file") ||
+				lowerText.includes("failed") ||
+				lowerText.includes("tool execution failed")
+			) {
+				return true
+			}
 		}
 
-		this.lastProgressPercent = calculatedPercent
-		this.lastProgressUpdate = Date.now()
-		return calculatedPercent
+		return false
 	}
 
-	private getProgressMessage(message: any): string {
-		if (message.text) return message.text
+	/**
+	 * Hata mesajından hata metnini çıkarır
+	 */
+	private extractErrorMessage(message: any): string {
+		if (message.text) {
+			return message.text
+		}
+		if (message.say) {
+			return message.say
+		}
+		if (message.type) {
+			return `Error type: ${message.type}`
+		}
+		return "Bilinmeyen hata"
+	}
 
-		if (message.say == "api_req_started") return "Görev Prompu Hazırlanıyor ve AI İşlemleri"
-		if (message.say == "api_req_finished") return "AI işlemleri Tamamlanıyor."
+	/**
+	 * Hata tipini kategorize eder
+	 */
+	private categorizeError(errorText: string): string {
+		const lower = errorText.toLowerCase()
 
-		// Türkçe eşleştirme sözlüğü
-		const TR: Record<string, string> = {
-			api_req_started: "API isteği başlatıldı",
-			api_req_finished: "API isteği tamamlandı",
-			tool_use: "Araç (tool) kullanılıyor",
-			completion_result: "Tamamlama sonucu hazır",
-			file_edit: "Dosya düzenleniyor",
-			test_run: "Testler çalıştırılıyor",
-			waiting: "Bekleniyor",
+		if (lower.includes("writing file") || lower.includes("write_to_file")) {
+			return "file_write_error"
+		}
+		if (lower.includes("permission") || lower.includes("access denied")) {
+			return "permission_error"
+		}
+		if (lower.includes("timeout") || lower.includes("timed out")) {
+			return "timeout_error"
+		}
+		if (lower.includes("network") || lower.includes("connection")) {
+			return "network_error"
 		}
 
-		// Cline'ın 'say' alanı için Türkçe karşılık varsa onu kullan
-		if (message.say && TR[message.say]) return `Cline: ${TR[message.say]}`
-		if (message.say) return `Cline: ${message.say}`
-
-		// (Normalde 'ask' yakalanıp hata atılıyor; yine de düşerse)
-		if (message.ask) return `Cline soruyor: ${message.ask}`
-
-		// Tip için Türkçe karşılık varsa onu kullan
-		if (message.type && TR[message.type]) return `İşlem: ${TR[message.type]}`
-		if (message.type) return `İşlem: ${message.type}`
-
-		return "Cline çalışıyor..."
+		return "unknown_error"
 	}
 
 	private extractProgressDetails(message: any): any {
@@ -901,6 +1116,15 @@ class TaskManager {
 			const n = retryCount
 			const backoff = Math.min(2 ** n, 32) * this.config.retryBaseDelay // Use configured retryBaseDelay
 			this.logger.warn(`${this.getTaskLogPrefix()}🔄 YENİDEN DENENİYOR #${n} in ${backoff / 1000}s (errorType=${e.kind})`)
+
+			// Retry yapılacaksa progress'e bildir
+			await this.taskService.progress(task.id, {
+				percent: this.lastProgressPercent || 50,
+				message: `Hata tespit edildi, yeniden deneniyor (#${n}): ${e.message}`,
+				isError: true,
+				errorMessage: e.message,
+			})
+
 			await delay(backoff)
 
 			// Görevi sıfırla ve yeniden başlat
@@ -908,6 +1132,14 @@ class TaskManager {
 			await this.processNextTask()
 			return
 		}
+
+		// Retry yapılmayacaksa progress'e hata bildir
+		await this.taskService.progress(task.id, {
+			percent: this.lastProgressPercent || 50,
+			message: `Görev başarısız oldu: ${e.message}`,
+			isError: true,
+			errorMessage: e.message,
+		})
 
 		// Backend'e hata bildir
 		await this.taskService.fail(task.id, {
