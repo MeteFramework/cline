@@ -113,24 +113,41 @@ export class IssueControllerAPI {
 	}
 
 	async getNextTask(): Promise<{ task: GostergeTask | null; status: number }> {
-		if (!this.clineWorkerId) await this.ping()
+		try {
+			if (!this.clineWorkerId) {
+				this.logger.debug("ClineWorkerId yok, ping yapılıyor...")
+				await this.ping()
+			}
 
-		const url = new URL(`${this.baseUrl}/issue/getNextTask`)
-		url.searchParams.set("workerId", String(this.clineWorkerId))
+			const url = new URL(`${this.baseUrl}/issue/getNextTask`)
+			url.searchParams.set("workerId", String(this.clineWorkerId))
 
-		const resp = await fetch(url.toString(), { method: "GET" })
-		if (resp.status === 204) {
-			return { task: null, status: 204 }
+			this.logger.info(`📡 GET ${url.toString()}`)
+			const resp = await fetch(url.toString(), { method: "GET" })
+
+			if (resp.status === 204) {
+				this.logger.info("ℹ️ Backend'den görev yok (204 No Content)")
+				return { task: null, status: 204 }
+			}
+
+			if (!resp.ok) {
+				const errorText = await resp.text().catch(() => "Unknown error")
+				throw new GostergeError(`getNextTask failed: ${resp.status} ${errorText}`, "api")
+			}
+
+			const dto = (await resp.json()) as GostergeTaskDto
+			// DTO dolu geldiğinde atrTaskId'yi GOSTERGE_CUSTOM_HEADERS'a ata
+			if (dto && dto.atrTaskId) {
+				this.updateGostergeHeaders(dto.atrTaskId)
+			}
+			const task = this.mapTask(dto)
+			this.stepNo = 0
+			this.logger.info(`✅ Yeni görev alındı: ${task.title} (ID: ${task.id})`)
+			return { task, status: 200 }
+		} catch (error: any) {
+			this.logger.error(`❌ getNextTask hatası: ${error.message}`)
+			throw error
 		}
-
-		const dto = (await resp.json()) as GostergeTaskDto
-		// DTO dolu geldiğinde atrTaskId'yi GOSTERGE_CUSTOM_HEADERS'a ata
-		if (dto && dto.atrTaskId) {
-			this.updateGostergeHeaders(dto.atrTaskId)
-		}
-		const task = this.mapTask(dto)
-		this.stepNo = 0
-		return { task, status: 200 }
 	}
 
 	async updateProgress(taskId: string, progress: Omit<TaskProgress, "taskId" | "timestamp">): Promise<{ status: number }> {

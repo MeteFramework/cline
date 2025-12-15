@@ -158,12 +158,20 @@ interface GostergeConfig {
 	healthCheckInterval: number
 	logLevel?: "debug" | "info" | "warn" | "error" // Added
 	retryBaseDelay: number // Added
-	/** Cline’dan mesaj gelmezse iptal süresi (ms) */
+	/** Cline'dan mesaj gelmezse iptal süresi (ms) */
 	stallTimeout: number
 	/** Yeni: mock yerine gerçek API kullanımı için anahtarlar */
 	useMockBackend?: boolean
 	defaultRepoUrl?: string
 	defaultBaseBranch?: string
+	/** Plan mode'u aktif et/devre dışı bırak */
+	enablePlanMode?: boolean
+	/** Plan aşaması için timeout (ms) */
+	planTimeout?: number
+	/** Plan tamamlandı sinyalleri (regex patterns) */
+	planCompletionSignals?: string[]
+	/** Plan başarısız olursa direkt Act mode'a geç */
+	planModeFallbackToAct?: boolean
 }
 
 function loadConfig(context: vscode.ExtensionContext): GostergeConfig {
@@ -191,6 +199,12 @@ function loadConfig(context: vscode.ExtensionContext): GostergeConfig {
 		useMockBackend: cfg.get<boolean>("useMockBackend") ?? false,
 		defaultRepoUrl: cfg.get<string>("defaultRepoUrl") ?? undefined,
 		defaultBaseBranch: cfg.get<string>("defaultBaseBranch") ?? undefined,
+		enablePlanMode: cfg.get<boolean>("enablePlanMode") ?? true,
+		planTimeout: cfg.get<number>("planTimeout") ?? 300_000, // 5 dakika
+		planCompletionSignals: cfg.get<string[]>("planCompletionSignals") ?? [
+			"plan.*complete|tamamlandı|ready.*implement|act.*mode|uygula|implement",
+		],
+		planModeFallbackToAct: cfg.get<boolean>("planModeFallbackToAct") ?? true,
 	}
 }
 
@@ -242,9 +256,16 @@ class TaskService {
 	}
 
 	async next(): Promise<GostergeTask | null> {
-		const { task, status } = await this.api.getNextTask()
-		if (status === 204) return null
-		return task
+		try {
+			const { task, status } = await this.api.getNextTask()
+			if (status === 204) {
+				return null
+			}
+			return task
+		} catch (error: any) {
+			this.logger.error(`TaskService.next() hatası: ${error.message}`)
+			throw error
+		}
 	}
 
 	async progress(taskId: UUID, progress: Omit<TaskProgress, "taskId" | "timestamp">): Promise<void> {
@@ -598,6 +619,11 @@ class TaskManager {
 
 	private queue = Promise.resolve() // Add queue
 
+	/** Plan içeriğini saklamak için */
+	private planContent: string = ""
+	/** Plan aşaması başladı mı? */
+	private planPhaseStarted: boolean = false
+
 	private getTaskLogPrefix(): string {
 		return this.currentTask ? `[task:${this.currentTask.id.slice(0, 8)}] ` : ""
 	}
@@ -650,17 +676,24 @@ class TaskManager {
 			return
 		}
 
+		let taskProcessed = false // Task gerçekten işlendi mi?
+
 		try {
 			// Backend'den görev al
+			this.logger.info("🔍 Backend'den görev kontrol ediliyor...")
 			const task = await this.taskService.next()
 			if (!task) {
+				this.logger.info("ℹ️ Kuyrukta görev yok, bir sonraki kontrol bekleniyor...")
 				return // Kuyrukta görev yok
 			}
 
+			taskProcessed = true // Task bulundu ve işlenecek
 			this.busy = true
 			this.currentTask = task
 			this.taskStartTime = Date.now()
 			this.abortController = new AbortController()
+			this.planPhaseStarted = false
+			this.planContent = ""
 
 			const retryCount = this.taskService["retryCount"].get(task.id) || 0
 			const taskPrefix = retryCount > 0 ? `🔄 YENİDEN DENEYİŞ #${retryCount} ` : `🟢 YENİ GÖREV`
@@ -688,8 +721,16 @@ class TaskManager {
 			await this.finalizeTask(task)
 
 			this.logger.info(`✅ Görev başarıyla tamamlandı: ${task.id}`)
+
+			// Görev başarıyla tamamlandıktan sonra bir sonraki task'ı kontrol et
+			setTimeout(() => {
+				this.processNextTask().catch((err) => {
+					this.logger.error(`❌ Sonraki görev kontrolü hatası: ${err.message}`)
+				})
+			}, 0)
 		} catch (error: any) {
 			await this.handleTaskError(error)
+			// handleTaskError içinde zaten bir sonraki task kontrol ediliyor, burada tekrar etmeye gerek yok
 		} finally {
 			this.busy = false
 			this.currentTask = null
@@ -734,49 +775,196 @@ class TaskManager {
 			message: "Cline görevi analiz ediyor...",
 		})
 
-		// Create a watchdog to monitor Cline's progress
+		// Plan mode aktifse iki aşamalı işlem yap
+		if (this.config.enablePlanMode) {
+			try {
+				await this.executePlanPhase(task)
+			} catch (error: any) {
+				// Plan aşaması başarısız oldu
+				this.logger.warn(`${this.getTaskLogPrefix()}⚠️ Plan aşaması başarısız: ${error.message}`)
+
+				if (this.config.planModeFallbackToAct) {
+					this.logger.info(`${this.getTaskLogPrefix()}🔄 Plan aşaması atlanıyor, direkt Act mode'a geçiliyor...`)
+					// Fallback: Direkt Act mode'da devam et
+					await this.executeActPhaseDirect(task)
+					return
+				} else {
+					// Fallback kapalıysa hatayı fırlat
+					throw error
+				}
+			}
+
+			// Plan başarılı, Act aşamasına geç
+			await this.executeActPhase(task)
+		} else {
+			// Plan mode kapalı, direkt Act mode'da çalış
+			await this.executeActPhaseDirect(task)
+		}
+	}
+
+	/**
+	 * Plan aşamasını yürütür
+	 */
+	private async executePlanPhase(task: GostergeTask): Promise<void> {
+		this.logger.info(`${this.getTaskLogPrefix()}📋 Plan aşaması başlatılıyor...`)
+		this.planPhaseStarted = true
+		this.planContent = ""
+
+		// Progress: %50 - Planlama işlemi başladı
+		await this.taskService.progress(task.id, {
+			percent: 50,
+			message: "Planlama işlemi başladı...",
+		})
+
+		// Plan completion callback
+		let planCompleted = false
+		let planContent = ""
+
+		// Cline mesajlarını dinle
+		const messageDisposable = this.cline.onMessage(async (msg: ClineMessage) => {
+			// Plan tamamlandı sinyali kontrolü
+			if (this.isPlanCompletionSignal(msg)) {
+				planCompleted = true
+				planContent = this.extractPlanFromMessage(msg)
+				this.cline.setPlanCompleted(true)
+				this.logger.info(`${this.getTaskLogPrefix()}✅ Plan tamamlandı sinyali alındı`)
+			} else if (msg.text || msg.say) {
+				// Plan içeriğini biriktir
+				const content = msg.text || msg.say || ""
+				if (content && !planCompleted) {
+					planContent += content + "\n"
+					this.cline.updatePlanContent(planContent)
+				}
+			}
+		})
+
+		// Periyodik polling
+		const pollIntervalId = setInterval(() => {
+			this.cline.pollAndDispatchMessages()
+		}, this.config.pollInterval)
+
+		try {
+			// Plan mode'da görevi başlat
+			await this.cline.startTaskInPlanMode(task)
+
+			// Plan tamamlanana kadar bekle (timeout ile)
+			const planStartTime = Date.now()
+			const planTimeout = this.config.planTimeout || 300_000
+
+			while (!planCompleted && !this.cline.isPlanCompleted()) {
+				// Timeout kontrolü
+				if (Date.now() - planStartTime > planTimeout) {
+					this.logger.warn(`${this.getTaskLogPrefix()}⏱️ Plan timeout'a uğradı`)
+					throw new GostergeError("Plan aşaması timeout'a uğradı", "timeout")
+				}
+
+				// Abort kontrolü
+				if (this.abortController?.signal.aborted) {
+					throw new GostergeError("Plan aşaması iptal edildi", "internal")
+				}
+
+				// Kısa bir bekleme
+				await delay(1000)
+			}
+
+			// Plan içeriğini sakla
+			if (planContent) {
+				this.planContent = planContent
+				this.cline.updatePlanContent(planContent)
+			}
+
+			// Progress: %75 - Görev işleme işlemi başladı
+			await this.taskService.progress(task.id, {
+				percent: 75,
+				message: "Görev işleme işlemi başladı...",
+			})
+
+			this.logger.info(`${this.getTaskLogPrefix()}✅ Plan aşaması tamamlandı`)
+		} finally {
+			// Watchdog'u kaldırdık - sadece mesaj dinleme ve polling'i temizle
+			messageDisposable.dispose()
+			clearInterval(pollIntervalId)
+		}
+	}
+
+	/**
+	 * Act aşamasını yürütür (plan'dan sonra)
+	 */
+	private async executeActPhase(task: GostergeTask): Promise<void> {
+		this.logger.info(`${this.getTaskLogPrefix()}🚀 Act aşaması başlatılıyor...`)
+
+		// Plan içeriğini al
+		const plan = this.planContent || this.cline.getPlanContent() || "No plan available"
+
+		// Act mode'a geç ve planı uygula
+		await this.cline.switchToActModeAndExecute(plan)
+
+		// Mode değişikliği ve mesajların gelmesi için yeterli bekleme süresi
+		// Cline'ın UI'ı güncellemesi ve resume_task butonunu göstermesi için zaman tanı
+		this.logger.debug(`${this.getTaskLogPrefix()}⏳ Act mode'a geçiş sonrası bekleniyor (mesajların gelmesi için)...`)
+		await delay(2000) // 2 saniye bekle
+
+		// Resume task butonunu kontrol et ve otomatik bas
+		// Plan'dan Act'e geçişte Cline genellikle resume_task butonu gösterir
+		const resumeTaskFound = await this.cline.checkAndAutoResumeTask(15, 1000) // 15 deneme, 1 saniye aralıklarla
+		if (resumeTaskFound) {
+			this.logger.info(`${this.getTaskLogPrefix()}✅ Resume task butonu bulundu ve otomatik basıldı`)
+		} else {
+			this.logger.debug(`${this.getTaskLogPrefix()}ℹ️ Resume task butonu bulunamadı (normal olabilir)`)
+		}
+
+		// Normal execution flow'u devam ettir
+		await this.executeActPhaseDirect(task)
+	}
+
+	/**
+	 * Act aşamasını direkt yürütür (plan olmadan veya plan'dan sonra)
+	 */
+	private async executeActPhaseDirect(task: GostergeTask): Promise<void> {
+		this.logger.info(`${this.getTaskLogPrefix()}🤖 Cline görevi işliyor...`)
+
+		// Progress: %50 (plan yoksa) veya %75 (plan varsa)
+		const progressPercent = this.planPhaseStarted ? 75 : 50
+		await this.taskService.progress(task.id, {
+			percent: progressPercent,
+			message: "Cline görevi işliyor...",
+		})
+
+		// Watchdog oluştur
 		const watchdog = new Watchdog(this.cline, this.config, this.logger)
 
-		// Watchdog hata callback'i kaydet
+		// Watchdog hata callback'i
 		watchdog.setErrorCallback(async (error: GostergeError) => {
-			// Watchdog'dan hata geldiğinde progress'e bildir
 			this.logger.error(`${this.getTaskLogPrefix()}🚨 Watchdog hatası: ${error.message}`)
 			await this.taskService.progress(task.id, {
-				percent: this.lastProgressPercent || 50,
+				percent: this.lastProgressPercent || progressPercent,
 				message: `Hata tespit edildi: ${error.message}`,
 				isError: true,
 				errorMessage: error.message,
 			})
 		})
 
-		// Watchdog completion check callback'i kaydet
-		// completion_result mesajı gelmese bile görevin tamamlanmış olup olmadığını kontrol eder
+		// Completion check callback
 		watchdog.setCompletionCheckCallback(async (): Promise<boolean> => {
 			try {
-				// 1. Cline zaten tamamlandı mı kontrol et
 				if (this.cline.isTaskComplete()) {
 					this.logger.debug(`${this.getTaskLogPrefix()}✅ Cline görevi tamamlandı (isTaskComplete)`)
 					return true
 				}
 
-				// 2. Git değişiklikleri var mı kontrol et
 				const stats = await this.gitService.getChangeStats()
 				const hasChanges = stats.filesChanged > 0 || stats.linesAdded > 0 || stats.linesRemoved > 0
 
 				if (!hasChanges) {
-					// Değişiklik yok, henüz tamamlanmamış olabilir
 					return false
 				}
 
-				// 3. Son aktiviteden ne kadar süre geçti?
 				const timeSinceLastActivity = Date.now() - (this.lastProgressUpdate || Date.now())
-				const quietPeriod = 60000 // 1 dakika
+				const quietPeriod = 60000
 
-				// 4. Cline state kontrolü (streaming durdu mu?)
 				const clineState: any = this.cline["controller"]?.task?.taskState
 				const isStreaming = clineState?.isStreaming === true
 
-				// Değişiklik var + uzun süre sessizlik + streaming durdu → muhtemelen tamamlandı
 				if (hasChanges && timeSinceLastActivity > quietPeriod && !isStreaming) {
 					this.logger.info(
 						`${this.getTaskLogPrefix()}✅ Implicit completion detected: ${stats.filesChanged} files changed, ${Math.round(timeSinceLastActivity / 1000)}s quiet, streaming stopped`,
@@ -786,47 +974,86 @@ class TaskManager {
 
 				return false
 			} catch (error: any) {
-				// Completion check hatası, false döndür (görev devam ediyor kabul et)
 				this.logger.debug(`${this.getTaskLogPrefix()}⚠️ Completion check error: ${error.message}`)
 				return false
 			}
 		})
 
-		// Cline mesajlarını dinle (bu handler Watchdog'dan da mesaj alacak)
+		// Mesaj handler
 		const messageDisposable = this.cline.onMessage(async (msg: ClineMessage) => {
 			await this.handleClineMessage(task.id, msg)
 		})
 
-		// Periyodik olarak Cline'dan mesajları çek ve Watchdog'a ilet
+		// Polling
 		const pollIntervalId = setInterval(() => {
 			this.cline.pollAndDispatchMessages()
-		}, this.config.pollInterval) // Use configured pollInterval
-
-		await this.taskService.progress(task.id, {
-			percent: 50,
-			message: "Cline görevi işliyor...",
-		})
+		}, this.config.pollInterval)
 
 		try {
-			// Görevi başlat
-			await this.cline.startTask(task)
+			// Eğer plan aşaması yapılmadıysa, normal task başlat
+			if (!this.planPhaseStarted) {
+				await this.cline.startTask(task)
+			}
 
 			// Watchdog'ın sonuçlanmasını bekle
-			// completionPromise resolve olursa → başarılı, catch'e düşmez
-			// Hata durumlarında → catch'e düşer ve error callback çağrılır
 			await watchdog.waitForResult(this.abortController!.signal)
 		} catch (error) {
-			// Watchdog'dan gelen hatalar burada yakalanır
-			// Error callback zaten çağrılmış olacak, burada sadece fırlatıyoruz
 			throw error
 		} finally {
 			messageDisposable.dispose()
-			clearInterval(pollIntervalId) // Stop polling
-			watchdog.dispose() // Ensure watchdog resources are cleaned up
+			clearInterval(pollIntervalId)
+			watchdog.dispose()
 		}
 	}
 
+	/**
+	 * Plan tamamlandı sinyali var mı kontrol eder
+	 */
+	private isPlanCompletionSignal(message: ClineMessage): boolean {
+		if (!this.config.planCompletionSignals || this.config.planCompletionSignals.length === 0) {
+			return false
+		}
+
+		const text = (message.text || message.say || "").toLowerCase()
+
+		for (const pattern of this.config.planCompletionSignals) {
+			try {
+				const regex = new RegExp(pattern, "i")
+				if (regex.test(text)) {
+					return true
+				}
+			} catch (e) {
+				// Geçersiz regex, string match yap
+				if (text.includes(pattern.toLowerCase())) {
+					return true
+				}
+			}
+		}
+
+		return false
+	}
+
+	/**
+	 * Mesajdan plan içeriğini çıkarır
+	 */
+	private extractPlanFromMessage(message: ClineMessage): string {
+		return message.text || message.say || ""
+	}
+
 	private async handleClineMessage(taskId: UUID, message: any): Promise<void> {
+		// 🤖 resume_task için özel kontrol (en önce kontrol et)
+		if (message.ask === "resume_task" || message.ask === "resume_completed_task") {
+			this.logger.info(`${this.getTaskLogPrefix()}🔄 Resume task butonu tespit edildi: ${message.ask}`)
+			try {
+				await this.cline.sendAutoResponse(message.ask, message.text)
+				this.logger.info(`${this.getTaskLogPrefix()}✅ Resume task otomatik cevap gönderildi`)
+				return
+			} catch (error: any) {
+				this.logger.error(`${this.getTaskLogPrefix()}❌ Resume task otomatik cevap gönderilemedi: ${error.message}`)
+				throw new GostergeError(`Resume task otomatik cevap gönderilemedi: ${error.message}`, "cline")
+			}
+		}
+
 		// 🤖 Otomatik modda soru sorulduğunda veya buton çıktığında otomatik cevap gönder
 		// Tüm buton tiplerini kontrol et: ask, primaryButton, secondaryButton, vb.
 		const hasButton =
@@ -1035,14 +1262,45 @@ class TaskManager {
 	private async finalizeTask(task: GostergeTask): Promise<void> {
 		this.logger.info(`${this.getTaskLogPrefix()}📦 Görev sonuçları işleniyor...`)
 
+		// Değişiklik istatistiklerini al
+		const stats = await this.gitService.getChangeStats()
+		const hasChanges = stats.filesChanged > 0 || stats.linesAdded > 0 || stats.linesRemoved > 0
+
+		if (!hasChanges) {
+			// Değişiklik yoksa, commit yapmadan görevi tamamla
+			this.logger.warn(`${this.getTaskLogPrefix()}⚠️ Görev tamamlandı ancak değişiklik yapılmadı`)
+
+			// Progress: %100
+			await this.taskService.progress(task.id, {
+				percent: 100,
+				message: "Görev tamamlandı (değişiklik yapılmadı)",
+			})
+
+			// Görevi tamamla (commitHash olmadan)
+			const duration = Date.now() - this.taskStartTime
+			await this.taskService.complete(task.id, {
+				branch: `${this.config.branchPrefix}${task.branch}`,
+				commitHash: undefined, // Değişiklik yok
+				stats: {
+					duration,
+					...stats,
+				},
+			})
+
+			this.logger.info(`${this.getTaskLogPrefix()}\n${"=".repeat(60)}`)
+			this.logger.info(`${this.getTaskLogPrefix()}✅ GÖREV TAMAMLANDI (Değişiklik yapılmadı)`)
+			this.logger.info(`${this.getTaskLogPrefix()}🌿 Branch: ${this.config.branchPrefix}${task.branch}`)
+			this.logger.info(`${this.getTaskLogPrefix()}⏱️ Süre: ${Math.round(duration / 1000)} saniye`)
+			this.logger.info(`${this.getTaskLogPrefix()}${"=".repeat(60)}\n`)
+			return
+		}
+
+		// Değişiklik varsa normal akış
 		// Progress: %95
 		await this.taskService.progress(task.id, {
 			percent: 95,
 			message: "Değişiklikler commit ediliyor...",
 		})
-
-		// Değişiklik istatistiklerini al
-		const stats = await this.gitService.getChangeStats()
 
 		// Commit yap
 		const commitHash = await this.gitService.commitChanges(task.title, stats)
@@ -1109,28 +1367,37 @@ class TaskManager {
 		const recoverable = ["git", "api", "cline", "timeout"].includes(e.kind) // Use GostergeError kind
 
 		// Retry kontrolü
+		const currentRetryCount = this.taskService["retryCount"].get(task.id) || 0
 		if (recoverable && this.taskService.shouldRetry(task.id)) {
-			this.taskService.incrementRetry(task.id)
-			const retryCount = this.taskService["retryCount"].get(task.id) || 1
+			const newRetryCount = this.taskService.incrementRetry(task.id)
+			const maxRetries = this.config.maxRetries
 
-			const n = retryCount
-			const backoff = Math.min(2 ** n, 32) * this.config.retryBaseDelay // Use configured retryBaseDelay
-			this.logger.warn(`${this.getTaskLogPrefix()}🔄 YENİDEN DENENİYOR #${n} in ${backoff / 1000}s (errorType=${e.kind})`)
+			const backoff = Math.min(2 ** newRetryCount, 32) * this.config.retryBaseDelay // Use configured retryBaseDelay
+			this.logger.warn(
+				`${this.getTaskLogPrefix()}🔄 YENİDEN DENENİYOR #${newRetryCount}/${maxRetries} in ${backoff / 1000}s (errorType=${e.kind})`,
+			)
 
 			// Retry yapılacaksa progress'e bildir
 			await this.taskService.progress(task.id, {
 				percent: this.lastProgressPercent || 50,
-				message: `Hata tespit edildi, yeniden deneniyor (#${n}): ${e.message}`,
+				message: `Hata tespit edildi, yeniden deneniyor (#${newRetryCount}/${maxRetries}): ${e.message}`,
 				isError: true,
 				errorMessage: e.message,
 			})
 
 			await delay(backoff)
 
-			// Görevi sıfırla ve yeniden başlat
+			// Görevi sıfırla ve yeniden başlat (aynı task'ı tekrar dener)
 			this.busy = false
 			await this.processNextTask()
 			return
+		}
+
+		// Max retry'a ulaşıldıysa bilgi ver
+		if (recoverable && currentRetryCount >= this.config.maxRetries) {
+			this.logger.warn(
+				`${this.getTaskLogPrefix()}⚠️ Maksimum retry sayısına (${this.config.maxRetries}) ulaşıldı, görev başarısız olarak işaretleniyor ve bir sonraki task'a geçiliyor`,
+			)
 		}
 
 		// Retry yapılmayacaksa progress'e hata bildir
@@ -1173,6 +1440,14 @@ class TaskManager {
 		} catch {
 			// Ignore abort errors
 		}
+
+		// Hata işlendikten sonra bir sonraki task'ı kontrol et
+		// setTimeout(0) kullanarak mevcut async işlemlerin tamamlanmasını garantiliyoruz
+		setTimeout(() => {
+			this.processNextTask().catch((err) => {
+				this.logger.error(`❌ Sonraki görev kontrolü hatası: ${err.message}`)
+			})
+		}, 0)
 	}
 
 	abort(): void {
@@ -1232,14 +1507,21 @@ export function initializeGosterge(
 				// Periyodik görev kontrolü
 				const processTask = async () => {
 					try {
+						logger.info("🔄 Görev kontrolü başlatılıyor...")
 						await taskManager.processNextTask() // Call the public method which uses enqueue
 					} catch (error: any) {
 						logger.error(`❌ Görev işleme hatası: ${error.message}`)
+						if (error.stack) {
+							logger.error(`Stack: ${error.stack}`)
+						}
 					}
 				}
 
 				// İlk kontrolü hemen yap
-				processTask()
+				logger.info("🔍 İlk görev kontrolü yapılıyor...")
+				processTask().catch((err) => {
+					logger.error(`❌ İlk görev kontrolü hatası: ${err.message}`)
+				})
 
 				// Periyodik kontrol başlat
 				const intervalId = setInterval(processTask, config.pollInterval)
